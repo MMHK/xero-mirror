@@ -1,33 +1,61 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# ============================================================
+# xero-mirror .gitignore
+# 原則：產物與本機設定不進版控；可重現的來源（go.mod / go.sum / .env.example）要進版控。
+# ============================================================
+
+# --- 建置產物（AGENTS §11 禁止提交）---
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+/xero-mirror
+/xero-mirror.exe
 
-# Test binary, built with `go test -c`
+# 測試編譯產物
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.*
 !coverage.go
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# --- 依賴（AGENTS §11 禁止提交 vendor/）---
+vendor/
 
-# Go workspace file
+# Go workspace
 go.work
 go.work.sum
 
-# env file
+# --- 本機設定與憑證（AGENTS §7／§11）---
 .env
+.env.local
+.env.*.local
+# 模板要進版控
+!.env.example
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# --- 日誌與暫存 ---
+*.log
+tmp/
+dist/
+
+# --- 編輯器 / IDE（AGENTS §11 禁止提交）---
+.idea/
+.vscode/
+*.iml
+out/
+.fleet/
+*.swp
+*.swo
+*~
+
+# --- 作業系統 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 一次性驗證 / 暫存檔 ---
+nul
+*.bak
+*.orig
+*.rej
