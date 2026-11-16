@@ -1,0 +1,262 @@
+// pkg/sync 是唯一的同步核心：cursor 增量、月度視窗回補與未來的 webhook／cron
+// 觸發都走同一條 fetch → upsert 路徑，不得另寫第二套抓取或寫入邏輯。
+package sync
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/mmhk/xero-mirror/pkg/store"
+	"github.com/mmhk/xero-mirror/pkg/xero"
+)
+
+// Entity 是同步實體；值同時寫入 sync_state.entity。
+type Entity string
+
+const (
+	EntityContacts    Entity = "CONTACTS"
+	EntityAccounts    Entity = "ACCOUNTS"
+	EntityInvoices    Entity = "INVOICES"
+	EntityCreditNotes Entity = "CREDIT_NOTES"
+	EntityPayments    Entity = "PAYMENTS"
+)
+
+// Window 是同步範圍：Cursor 為增量水位，MonthStart／MonthEnd 為回補區間
+// （下月 1 日 00:00 止，半開區間）；Cursor 與月度視窗互斥。
+type Window struct {
+	Cursor     *time.Time
+	MonthStart *time.Time
+	MonthEnd   *time.Time
+}
+
+// Runner 執行同步；client 與 store 由外部注入。
+type Runner struct {
+	client *xero.Client
+	store  *store.Store
+}
+
+// NewRunner 建立同步執行器。
+func NewRunner(c *xero.Client, s *store.Store) *Runner {
+	return &Runner{client: c, store: s}
+}
+
+// entitySpec 描述端點能力；未核對支援度的能力一律關閉，走全量 + 冪等 upsert。
+type entitySpec struct {
+	path          string
+	paginated     bool
+	supportsSince bool
+	monthFilter   bool
+}
+
+// entitySpecs 是五個實體的端點能力表（對照 doc/spec.md §5）。
+var entitySpecs = map[Entity]entitySpec{
+	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: false, monthFilter: false},
+	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false},
+	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true},
+	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: false, monthFilter: false},
+	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: false, monthFilter: false},
+}
+
+// Run 依 Window 抓取單一 entity：所有頁抓完、映射完成後只寫一次 DB。
+// 抓取過程不推進 cursor，避免中途失敗後用較新水位略過尚未抓到的資料。
+func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error {
+	spec, ok := entitySpecs[entity]
+	if !ok {
+		return fmt.Errorf("同步 %s: 未知的實體", entity)
+	}
+	if err := validateWindow(w); err != nil {
+		return fmt.Errorf("同步 %s: %w", entity, err)
+	}
+	query, headers := buildRequest(spec, w)
+	a := &pageApplier{
+		tenantID: tenantID, entity: entity,
+		syncedAt: time.Now().UTC(), trackCursor: w.MonthStart == nil,
+	}
+	a.batch.TenantID = tenantID
+	if spec.paginated {
+		if err := r.client.GetPages(ctx, tenantID, spec.path, query, headers, a.handle); err != nil {
+			return fmt.Errorf("同步 %s: %w", entity, err)
+		}
+	} else if body, err := r.client.Get(ctx, tenantID, spec.path, query, headers); err != nil {
+		return fmt.Errorf("同步 %s: %w", entity, err)
+	} else if _, err := a.handle(0, body); err != nil {
+		return fmt.Errorf("同步 %s: %w", entity, err)
+	}
+	if a.total > 0 {
+		a.batch.Entity = string(entity)
+		if a.trackCursor {
+			a.batch.Cursor = a.maxAt
+		}
+		if err := r.store.ApplyBatch(ctx, a.batch); err != nil {
+			return fmt.Errorf("同步 %s: %w", entity, err)
+		}
+	}
+	slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", a.total)
+	return nil
+}
+
+// pageApplier 彙總一次 Run 的抓取結果；handle 符合 GetPages 的回呼簽名。
+type pageApplier struct {
+	tenantID    string
+	entity      Entity
+	syncedAt    time.Time
+	trackCursor bool
+	batch       store.Batch
+	maxAt       *time.Time
+	total       int
+}
+
+// handle 解析單頁並累積到批次；抓取過程不寫 DB，全部頁完成後才一次 ApplyBatch。
+func (a *pageApplier) handle(_ int, body []byte) (int, error) {
+	b, n, maxAt, err := decodePage(a.entity, body, a.tenantID, a.syncedAt)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	a.batch.Contacts = append(a.batch.Contacts, b.Contacts...)
+	a.batch.Accounts = append(a.batch.Accounts, b.Accounts...)
+	a.batch.Invoices = append(a.batch.Invoices, b.Invoices...)
+	a.batch.CreditNotes = append(a.batch.CreditNotes, b.CreditNotes...)
+	a.batch.Payments = append(a.batch.Payments, b.Payments...)
+	if a.trackCursor {
+		a.maxAt = latest(a.maxAt, maxAt)
+	}
+	a.total += n
+	return n, nil
+}
+
+// decodePage 依實體分派到對應解碼函式；不認識的實體回錯誤。
+func decodePage(entity Entity, body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	switch entity {
+	case EntityContacts:
+		return decodeContacts(body, tenantID, syncedAt)
+	case EntityAccounts:
+		return decodeAccounts(body, tenantID, syncedAt)
+	case EntityInvoices:
+		return decodeInvoices(body, tenantID, syncedAt)
+	case EntityCreditNotes:
+		return decodeCreditNotes(body, tenantID, syncedAt)
+	case EntityPayments:
+		return decodePayments(body, tenantID, syncedAt)
+	}
+	return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: 未知的實體", entity)
+}
+
+// decodeContacts 解析 /Contacts 單頁；n 是本頁筆數。
+func decodeContacts(body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	var resp xero.ContactsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: %w", EntityContacts, err)
+	}
+	b := store.Batch{TenantID: tenantID, Contacts: toStoreContacts(resp.Contacts, tenantID, syncedAt)}
+	return b, len(b.Contacts), maxUpdatedAt(b.Contacts, func(c store.Contact) *time.Time { return c.XeroUpdatedAt }), nil
+}
+
+// decodeAccounts 解析 /Accounts 單頁；n 是本頁筆數。
+func decodeAccounts(body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	var resp xero.AccountsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: %w", EntityAccounts, err)
+	}
+	b := store.Batch{TenantID: tenantID, Accounts: toStoreAccounts(resp.Accounts, tenantID, syncedAt)}
+	return b, len(b.Accounts), maxUpdatedAt(b.Accounts, func(a store.Account) *time.Time { return a.XeroUpdatedAt }), nil
+}
+
+// decodeInvoices 解析 /Invoices 單頁；n 是本頁筆數。
+func decodeInvoices(body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	var resp xero.InvoicesResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: %w", EntityInvoices, err)
+	}
+	b := store.Batch{TenantID: tenantID, Invoices: toStoreInvoices(resp.Invoices, tenantID, syncedAt)}
+	return b, len(b.Invoices), maxUpdatedAt(b.Invoices, func(i store.Invoice) *time.Time { return i.XeroUpdatedAt }), nil
+}
+
+// decodeCreditNotes 解析 /CreditNotes 單頁；n 是本頁筆數。
+func decodeCreditNotes(body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	var resp xero.CreditNotesResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: %w", EntityCreditNotes, err)
+	}
+	b := store.Batch{TenantID: tenantID, CreditNotes: toStoreCreditNotes(resp.CreditNotes, tenantID, syncedAt)}
+	return b, len(b.CreditNotes), maxUpdatedAt(b.CreditNotes, func(c store.CreditNote) *time.Time { return c.XeroUpdatedAt }), nil
+}
+
+// decodePayments 解析 /Payments 單頁；n 是本頁筆數。
+func decodePayments(body []byte, tenantID string, syncedAt time.Time) (store.Batch, int, *time.Time, error) {
+	var resp xero.PaymentsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return store.Batch{}, 0, nil, fmt.Errorf("解析 %s: %w", EntityPayments, err)
+	}
+	b := store.Batch{TenantID: tenantID, Payments: toStorePayments(resp.Payments, tenantID, syncedAt)}
+	return b, len(b.Payments), maxUpdatedAt(b.Payments, func(p store.Payment) *time.Time { return p.XeroUpdatedAt }), nil
+}
+
+// validateWindow 檢查 Cursor 與月度視窗互斥，且月度視窗兩端必須成對。
+func validateWindow(w Window) error {
+	if w.Cursor != nil && (w.MonthStart != nil || w.MonthEnd != nil) {
+		return fmt.Errorf("Cursor 與月度視窗不可同時使用")
+	}
+	if (w.MonthStart == nil) != (w.MonthEnd == nil) {
+		return fmt.Errorf("月度視窗需同時提供 MonthStart 與 MonthEnd")
+	}
+	return nil
+}
+
+// buildRequest 依端點能力決定 query 與 headers；不支援的能力一律退化為全量。
+func buildRequest(spec entitySpec, w Window) (url.Values, map[string]string) {
+	query := url.Values{}
+	headers := map[string]string{}
+	if w.Cursor != nil && spec.supportsSince {
+		headers["If-Modified-Since"] = w.Cursor.UTC().Format(http.TimeFormat)
+	}
+	if w.MonthStart == nil || w.MonthEnd == nil {
+		return query, headers
+	}
+	if spec.monthFilter {
+		query.Set("where", monthWhere(*w.MonthStart, *w.MonthEnd))
+	}
+	return query, headers
+}
+
+// monthWhere 組出 Xero where 條件（UTC 年月日、半開區間）：Date>=DateTime(...)&&Date<DateTime(...)。
+func monthWhere(start, end time.Time) string {
+	s, e := start.UTC(), end.UTC()
+	return fmt.Sprintf("Date>=DateTime(%d,%d,%d)&&Date<DateTime(%d,%d,%d)",
+		s.Year(), int(s.Month()), s.Day(), e.Year(), int(e.Month()), e.Day())
+}
+
+// latest 回傳 cur 與 batch 中較晚者；batch 為 nil 時沿用 cur，不清空水位。
+func latest(cur, batch *time.Time) *time.Time {
+	if batch == nil {
+		return cur
+	}
+	if cur != nil && !batch.After(*cur) {
+		return cur
+	}
+	v := batch.UTC()
+	return &v
+}
+
+// maxUpdatedAt 回傳這批資料最大的 xero_updated_at；全為 nil 時回 nil。
+func maxUpdatedAt[T any](rows []T, at func(T) *time.Time) *time.Time {
+	var max *time.Time
+	for _, r := range rows {
+		t := at(r)
+		if t == nil {
+			continue
+		}
+		if max == nil || t.After(*max) {
+			v := t.UTC()
+			max = &v
+		}
+	}
+	return max
+}
