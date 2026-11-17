@@ -1,0 +1,34 @@
+# xero-mirror local dev environment
+# 啟動：docker compose up -d
+# 停止：docker compose down
+# 清除資料：docker compose down -v
+# 連線：mysql -h 127.0.0.1 -P 3307 -u root -proot xero_mirror
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: xero-mirror-dev-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: xero_mirror
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts/init-dev.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+
+volumes:
+  mysql-data:
+    driver: local

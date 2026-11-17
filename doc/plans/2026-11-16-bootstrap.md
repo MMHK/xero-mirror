@@ -105,17 +105,16 @@
 
 ## 目前 repo 狀態（2026-11-17 續行點）
 
-已 commit（HEAD `39f8d4a feat: 同步核心`）：任務 1–8 全部產出。
+已 commit（HEAD `89527f0 feat: webhook buffer 與 handler`）：任務 1–8 + 任務 9a 部分。
 
-尚未 commit（工作區改動，屬任務 9b／9c 前置）：
+尚未 commit（工作區改動，屬 dev 環境設定）：
 
 | 檔案 | 狀態 |
 |------|------|
-| `pkg/sync/sync.go` | 🔄 `entitySpec` 已加 `supportsBatchIDs`；**尚未 `gofmt`**（欄位對齊跑掉） |
-| `.env.example` | 🔄 已加 `WEBHOOK_BUFFER_SIZE`／`WEBHOOK_BUFFER_DELAY` |
-| `doc/spec.md` | 🔄 已加 §7.0、§5 批量查詢、環境變數，並更新端點能力矩陣至 2026-11 |
-| `doc/modules/webhook-buffer.md` | 🔄 新增（untracked） |
-| `doc/plans/2026-11-16-bootstrap.md` | 🔄 本檔同步 |
+| `docker-compose.yml` | 🔄 新增：dev 環境 MySQL 8.4（port 3307、volume 持久化、healthcheck） |
+| `scripts/init-dev.sql` | 🔄 新增：dev DB 初始化（character set、dev 用戶） |
+| `doc/dev-setup.md` | 🔄 新增：本機開發環境設定文件 |
+| `.env.example` | 🔄 更新：MYSQL_DSN 範例指向 docker compose（port 3307） |
 
 模組現況：
 
