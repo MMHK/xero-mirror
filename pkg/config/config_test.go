@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/base64"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("SYNC_CRON", "0 */2 * * *")
 	t.Setenv("HTTP_ADDR", ":8080")
 	t.Setenv("XERO_DAILY_CALL_LIMIT", "")
+	t.Setenv("LOG_LEVEL", "")
 }
 
 func TestLoad(t *testing.T) {
@@ -35,6 +37,7 @@ func TestLoad(t *testing.T) {
 		{"DSN 開 clientFoundRows", func(t *testing.T) {
 			t.Setenv("MYSQL_DSN", "user:pass@tcp(127.0.0.1:3306)/xero_mirror?parseTime=true&clientFoundRows=true")
 		}, "不可開啟 clientFoundRows"},
+		{"LOG_LEVEL 非法", func(t *testing.T) { t.Setenv("LOG_LEVEL", "loud") }, "LOG_LEVEL 必須是 debug|info|warn|error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,4 +76,50 @@ func TestLoadWebhookBuffer(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+// TestParseLogLevel 驗證 LOG_LEVEL 解析：大小寫不敏感、去頭尾空白、未設定預設 info。
+func TestParseLogLevel(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    slog.Level
+		wantErr string
+	}{
+		{"空字串採預設 info", "", slog.LevelInfo, ""},
+		{"大寫 DEBUG", "DEBUG", slog.LevelDebug, ""},
+		{"info 去空白", " info ", slog.LevelInfo, ""},
+		{"warn", "warn", slog.LevelWarn, ""},
+		{"大寫 ERROR", "ERROR", slog.LevelError, ""},
+		{"非法值", "verbose", 0, "LOG_LEVEL 必須是 debug|info|warn|error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			level, err := parseLogLevel(tc.raw)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.ErrorContains(t, err, tc.raw)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, level)
+		})
+	}
+}
+
+// TestLoadLogLevel 驗證 Load 確實接上 LOG_LEVEL：合法值填入 Config，未設定走預設。
+func TestLoadLogLevel(t *testing.T) {
+	t.Run("debug 填入 Config", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("LOG_LEVEL", "debug")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, slog.LevelDebug, cfg.LogLevel)
+	})
+	t.Run("未設定預設 info", func(t *testing.T) {
+		setValidEnv(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, slog.LevelInfo, cfg.LogLevel)
+	})
 }

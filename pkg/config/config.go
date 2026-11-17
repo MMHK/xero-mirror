@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -51,6 +52,8 @@ type Config struct {
 	WebhookBufferSize int
 	// WebhookBufferDelay 是收到首筆事件後的最長等待時間，到期即 flush。
 	WebhookBufferDelay time.Duration
+	// LogLevel 是全域日誌等級，由 LOG_LEVEL 解析；未設定時為 info。
+	LogLevel slog.Level
 }
 
 // Load 讀取並驗證設定；.env 存在才載入，不存在則直接使用環境變數。
@@ -58,16 +61,10 @@ func Load() (*Config, error) {
 	if err := loadDotEnv(); err != nil {
 		return nil, err
 	}
-
-	env := make(map[string]string, len(requiredEnvNames))
-	for _, name := range requiredEnvNames {
-		v := os.Getenv(name)
-		if v == "" {
-			return nil, fmt.Errorf("缺少必填環境變數 %s", name)
-		}
-		env[name] = v
+	env, err := loadRequiredEnv()
+	if err != nil {
+		return nil, err
 	}
-
 	key, err := decodeTokenKey(env["XERO_TOKEN_ENC_KEY"])
 	if err != nil {
 		return nil, err
@@ -78,15 +75,7 @@ func Load() (*Config, error) {
 	if err := validateMySQLDSN(env["MYSQL_DSN"]); err != nil {
 		return nil, err
 	}
-	limit, err := parseDailyCallLimit(os.Getenv("XERO_DAILY_CALL_LIMIT"))
-	if err != nil {
-		return nil, err
-	}
-	bufferSize, err := parseWebhookBufferSize(os.Getenv("WEBHOOK_BUFFER_SIZE"))
-	if err != nil {
-		return nil, err
-	}
-	bufferDelayMs, err := parseWebhookBufferDelay(os.Getenv("WEBHOOK_BUFFER_DELAY"))
+	opt, err := parseOptionalSettings()
 	if err != nil {
 		return nil, err
 	}
@@ -100,10 +89,51 @@ func Load() (*Config, error) {
 		MySQLDSN:           env["MYSQL_DSN"],
 		SyncCron:           env["SYNC_CRON"],
 		HTTPAddr:           env["HTTP_ADDR"],
-		DailyCallLimit:     limit,
-		WebhookBufferSize:  bufferSize,
-		WebhookBufferDelay: time.Duration(bufferDelayMs) * time.Millisecond,
+		DailyCallLimit:     opt.dailyCallLimit,
+		WebhookBufferSize:  opt.bufferSize,
+		WebhookBufferDelay: time.Duration(opt.bufferDelayMs) * time.Millisecond,
+		LogLevel:           opt.logLevel,
 	}, nil
+}
+
+// loadRequiredEnv 收集必填環境變數；缺任一個即回錯（訊息帶變數名稱）。
+func loadRequiredEnv() (map[string]string, error) {
+	env := make(map[string]string, len(requiredEnvNames))
+	for _, name := range requiredEnvNames {
+		v := os.Getenv(name)
+		if v == "" {
+			return nil, fmt.Errorf("缺少必填環境變數 %s", name)
+		}
+		env[name] = v
+	}
+	return env, nil
+}
+
+// optionalSettings 是選用環境變數解析後的結果。
+type optionalSettings struct {
+	dailyCallLimit int
+	bufferSize     int
+	bufferDelayMs  int
+	logLevel       slog.Level
+}
+
+// parseOptionalSettings 解析選用變數；任一格式錯誤即回錯，未設定則採預設。
+func parseOptionalSettings() (optionalSettings, error) {
+	var s optionalSettings
+	var err error
+	if s.dailyCallLimit, err = parseDailyCallLimit(os.Getenv("XERO_DAILY_CALL_LIMIT")); err != nil {
+		return s, err
+	}
+	if s.bufferSize, err = parseWebhookBufferSize(os.Getenv("WEBHOOK_BUFFER_SIZE")); err != nil {
+		return s, err
+	}
+	if s.bufferDelayMs, err = parseWebhookBufferDelay(os.Getenv("WEBHOOK_BUFFER_DELAY")); err != nil {
+		return s, err
+	}
+	if s.logLevel, err = parseLogLevel(os.Getenv("LOG_LEVEL")); err != nil {
+		return s, err
+	}
+	return s, nil
 }
 
 // loadDotEnv 只在工作目錄存在 .env 時載入，正式環境可直接吃環境變數。
@@ -196,4 +226,22 @@ func parseWebhookBufferDelay(raw string) (int, error) {
 		return 0, fmt.Errorf("WEBHOOK_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
 	}
 	return n, nil
+}
+
+// parseLogLevel 解析 LOG_LEVEL（大小寫不敏感、去頭尾空白）；未設定時預設 info。
+func parseLogLevel(raw string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("LOG_LEVEL 必須是 debug|info|warn|error（目前 %q）", raw)
+	}
 }

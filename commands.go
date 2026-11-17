@@ -25,6 +25,11 @@ const syncUsageText = "用法: xero-mirror sync [-month YYYY-MM] [-entity NAME]\
 	"  --month YYYY-MM  回補單月（預設逐 tenant 跑五實體；可與 --entity 併用）\n" +
 	"  --entity NAME    只同步指定實體（contacts|accounts|invoices|creditnotes|payments；可與 --month 併用）\n"
 
+// setupLogging 以設定的日誌等級重建全域 logger；在 config.Load 成功後、連 DB 前呼叫。
+func setupLogging(level slog.Level) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+}
+
 // readHeaderTimeout 是 HTTP server 讀請求 header 的上限，避免無 timeout 的常駐 server。
 const readHeaderTimeout = 10 * time.Second
 
@@ -56,6 +61,7 @@ func runSync(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("載入設定失敗: %w", err)
 	}
+	setupLogging(cfg.LogLevel)
 	db, err := store.OpenMigrated(ctx, cfg.MySQLDSN)
 	if err != nil {
 		return fmt.Errorf("初始化資料庫失敗: %w", err)
@@ -159,6 +165,7 @@ func runServe(ctx context.Context, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("載入設定失敗: %w", err)
 	}
+	setupLogging(cfg.LogLevel)
 	// 兩者皆派生自 context.Background()，不隨 signal ctx 連動；取消時機由 shutdown 掌控。
 	cronCtx, cancelCron := context.WithCancel(context.Background())
 	bufCtx, cancelBuf := context.WithCancel(context.Background())
@@ -285,6 +292,7 @@ func runAuth(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("載入設定失敗: %w", err)
 	}
+	setupLogging(cfg.LogLevel)
 	db, err := store.OpenMigrated(ctx, cfg.MySQLDSN)
 	if err != nil {
 		return fmt.Errorf("初始化資料庫失敗: %w", err)
