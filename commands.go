@@ -152,6 +152,7 @@ func buildRunner(cfg *config.Config, st *store.Store) (*sync.Runner, error) {
 type serveDeps struct {
 	db         *sql.DB
 	buf        *handler.WebhookBuffer
+	singleBuf  *handler.SingleGetBuffer
 	srv        *http.Server
 	cron       *cron.Cron
 	cancelCron context.CancelFunc
@@ -194,8 +195,9 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx con
 	}
 
 	buf := handler.NewWebhookBuffer(bufCtx, runner, cfg.WebhookBufferSize, cfg.WebhookBufferDelay)
+	singleBuf := handler.NewSingleGetBuffer(bufCtx, runner, cfg.SingleBufferDelay)
 	mux := handler.NewMux(
-		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey), buf),
+		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey), buf, singleBuf),
 		handler.NewHealthHandler(st),
 		handler.NewAdminHandler(runner, st),
 		handler.NewPageHandler(),
@@ -203,12 +205,13 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx con
 	// SkipIfStillRunning：上一輪同步還在跑時跳過本輪，避免長同步與下一輪 cron 重疊。
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
 	if _, err := c.AddFunc(cfg.SyncCron, func() { runCronSync(cronCtx, runner) }); err != nil {
+		_ = singleBuf.Shutdown(context.Background())
 		_ = buf.Shutdown(context.Background())
 		_ = db.Close()
 		return nil, fmt.Errorf("註冊 cron 排程失敗: %w", err)
 	}
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
-	return &serveDeps{db: db, buf: buf, srv: srv, cron: c, cancelCron: cancelCron, cancelBuf: cancelBuf}, nil
+	return &serveDeps{db: db, buf: buf, singleBuf: singleBuf, srv: srv, cron: c, cancelCron: cancelCron, cancelBuf: cancelBuf}, nil
 }
 
 // serveLoop 啟動 cron 與 HTTP server，等待關機訊號或 server 錯誤後優雅關閉。
@@ -265,6 +268,11 @@ func (d *serveDeps) shutdown() {
 		slog.Warn("webhook buffer 關閉失敗", "err", err)
 	} else {
 		slog.Info("webhook buffer 已關閉")
+	}
+	if err := d.singleBuf.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("single get buffer 關閉失敗", "err", err)
+	} else {
+		slog.Info("single get buffer 已關閉")
 	}
 	d.cancelBuf()
 

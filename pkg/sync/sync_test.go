@@ -525,3 +525,45 @@ func TestRunChunkedWriteFailureKeepsOldCursor(t *testing.T) {
 	require.NotNil(t, got.CursorTime)
 	require.True(t, got.CursorTime.Equal(old), "抓取失敗不得推進 cursor")
 }
+
+// TestRunSingleUsesSingleGetEndpoint 驗證 RunSingle 以 /{Entity}/{id} 端點抓取，
+// 且回應格式與 list 相同（包在 array 裡）可正確解析。
+func TestRunSingleUsesSingleGetEndpoint(t *testing.T) {
+	got := make(chan string, 1)
+	r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		got <- req.URL.Path
+		// Xero single get 回應格式與 list 相同，包在 array 裡
+		fmt.Fprint(w, `{"CreditNotes":[{"CreditNoteID":"cn-123","Type":"ACCRECCREDIT","Status":"AUTHORISED"}]}`)
+	})
+	err := r.RunSingle(context.Background(), "t1", EntityCreditNotes, "cn-123")
+	require.NoError(t, err)
+	require.Equal(t, "/CreditNotes/cn-123", <-got, "應使用 single get 端點")
+}
+
+// TestRunSingleRejectsUnsupported 驗證不支援 single get 的實體（如 Invoices）會回錯。
+func TestRunSingleRejectsUnsupported(t *testing.T) {
+	r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		t.Fatal("不應發出請求")
+	})
+	err := r.RunSingle(context.Background(), "t1", EntityInvoices, "inv-1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "不支援 single get")
+}
+
+// TestRunSingleSkipsEmptyID 驗證空白 ID 直接略過，不發請求。
+func TestRunSingleSkipsEmptyID(t *testing.T) {
+	r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		t.Fatal("空白 ID 不應發出請求")
+	})
+	require.NoError(t, r.RunSingle(context.Background(), "t1", EntityPayments, "  "))
+	require.NoError(t, r.RunSingle(context.Background(), "t1", EntityPayments, ""))
+}
+
+// TestSupportsSingleGetCoversExpectedEntities 驗證 single get 支援度矩陣正確。
+func TestSupportsSingleGetCoversExpectedEntities(t *testing.T) {
+	require.True(t, SupportsSingleGet(EntityCreditNotes))
+	require.True(t, SupportsSingleGet(EntityPayments))
+	require.True(t, SupportsSingleGet(EntityAccounts))
+	require.False(t, SupportsSingleGet(EntityInvoices), "Invoices 支援 batch IDs，不需要 single get")
+	require.False(t, SupportsSingleGet(EntityContacts), "Contacts 支援 batch IDs，不需要 single get")
+}

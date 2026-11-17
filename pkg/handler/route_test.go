@@ -12,7 +12,7 @@ import (
 
 // 案例 1：POST /webhook 經 NewMux 打到 webhook，簽章錯回 401，證明路由接線。
 func TestMuxRoutesWebhook(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	body := webhookBody(1, "mux-tenant")
 	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
 	req.Header.Set("x-xero-signature", "bad-signature")
@@ -69,7 +69,7 @@ func TestAdminRejectsUnknownEntityWithoutRunner(t *testing.T) {
 
 // 案例 5：GET / 回介紹頁 200 text/html，body 含站名。
 func TestPageHome(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -80,7 +80,7 @@ func TestPageHome(t *testing.T) {
 
 // 案例 6：GET /docs 回 Swagger UI 殼層 200 text/html，body 含掛載點。
 func TestPageDocs(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
@@ -91,7 +91,7 @@ func TestPageDocs(t *testing.T) {
 
 // 案例 7：GET /openapi.json 回 200 application/json，版本為 3.0.3 且路徑齊全。
 func TestPageOpenAPISpec(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
@@ -113,7 +113,7 @@ func TestPageOpenAPISpec(t *testing.T) {
 
 // 案例 8：頁面路由對非 GET 回 405 + Allow: GET（表驅動）。
 func TestPageMethodsNotAllowed(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	for _, p := range []string{"/", "/docs", "/openapi.json"} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, nil))
@@ -124,7 +124,7 @@ func TestPageMethodsNotAllowed(t *testing.T) {
 
 // 案例 9：GET /unknown 回 404，不回介紹頁。
 func TestPageUnknownPath(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))

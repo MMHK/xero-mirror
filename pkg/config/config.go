@@ -20,6 +20,8 @@ const (
 	DefaultWebhookBufferSize = 30
 	// DefaultWebhookBufferDelayMs 是 WEBHOOK_BUFFER_DELAY 未設定時的 flush delay（毫秒）。
 	DefaultWebhookBufferDelayMs = 3000
+	// DefaultSingleBufferDelayMs 是 SINGLE_BUFFER_DELAY 未設定時的 single get flush delay（毫秒）。
+	DefaultSingleBufferDelayMs = 5000
 	// redirectPortMin、redirectPortMax 是 localhost callback 允許的 port 範圍。
 	redirectPortMin = 3000
 	redirectPortMax = 9000
@@ -52,6 +54,8 @@ type Config struct {
 	WebhookBufferSize int
 	// WebhookBufferDelay 是收到首筆事件後的最長等待時間，到期即 flush。
 	WebhookBufferDelay time.Duration
+	// SingleBufferDelay 是 single get buffer 收到首筆事件後的延遲時間，到期後逐一抓取。
+	SingleBufferDelay time.Duration
 	// LogLevel 是全域日誌等級，由 LOG_LEVEL 解析；未設定時為 info。
 	LogLevel slog.Level
 }
@@ -92,6 +96,7 @@ func Load() (*Config, error) {
 		DailyCallLimit:     opt.dailyCallLimit,
 		WebhookBufferSize:  opt.bufferSize,
 		WebhookBufferDelay: time.Duration(opt.bufferDelayMs) * time.Millisecond,
+		SingleBufferDelay:  time.Duration(opt.singleBufferDelayMs) * time.Millisecond,
 		LogLevel:           opt.logLevel,
 	}, nil
 }
@@ -111,10 +116,11 @@ func loadRequiredEnv() (map[string]string, error) {
 
 // optionalSettings 是選用環境變數解析後的結果。
 type optionalSettings struct {
-	dailyCallLimit int
-	bufferSize     int
-	bufferDelayMs  int
-	logLevel       slog.Level
+	dailyCallLimit      int
+	bufferSize          int
+	bufferDelayMs       int
+	singleBufferDelayMs int
+	logLevel            slog.Level
 }
 
 // parseOptionalSettings 解析選用變數；任一格式錯誤即回錯，未設定則採預設。
@@ -128,6 +134,9 @@ func parseOptionalSettings() (optionalSettings, error) {
 		return s, err
 	}
 	if s.bufferDelayMs, err = parseWebhookBufferDelay(os.Getenv("WEBHOOK_BUFFER_DELAY")); err != nil {
+		return s, err
+	}
+	if s.singleBufferDelayMs, err = parseSingleBufferDelay(os.Getenv("SINGLE_BUFFER_DELAY")); err != nil {
 		return s, err
 	}
 	if s.logLevel, err = parseLogLevel(os.Getenv("LOG_LEVEL")); err != nil {
@@ -224,6 +233,18 @@ func parseWebhookBufferDelay(raw string) (int, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("WEBHOOK_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
+	}
+	return n, nil
+}
+
+// parseSingleBufferDelay 未設定時回預設毫秒數；有值則必須是正整數毫秒。
+func parseSingleBufferDelay(raw string) (int, error) {
+	if raw == "" {
+		return DefaultSingleBufferDelayMs, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("SINGLE_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
 	}
 	return n, nil
 }

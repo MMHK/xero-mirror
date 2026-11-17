@@ -54,16 +54,17 @@ type entitySpec struct {
 	paginated        bool
 	supportsSince    bool
 	monthFilter      bool
-	supportsBatchIDs bool // 支援 ?IDs=uuid1,uuid2,... 批量查詢
+	supportsBatchIDs bool   // 支援 ?IDs=uuid1,uuid2,... 批量查詢
+	singlePath       string // single get 端點路徑模板（含 %s 佔位符），空字串代表不支援
 }
 
 // entitySpecs 是五個實體的端點能力表（對照 doc/spec.md §5）。
 var entitySpecs = map[Entity]entitySpec{
-	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: true},
-	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
-	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true},
-	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false},
-	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false},
+	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: true, singlePath: ""},
+	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false, singlePath: "/Accounts/%s"},
+	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true, singlePath: ""},
+	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false, singlePath: "/CreditNotes/%s"},
+	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false, singlePath: "/Payments/%s"},
 }
 
 // Entities 回傳固定順序的五個同步實體；cron 與整 tenant 編排都照此順序執行。
@@ -81,6 +82,12 @@ func Entities() []Entity {
 func SupportsBatchIDs(e Entity) bool {
 	spec, ok := entitySpecs[e]
 	return ok && spec.supportsBatchIDs
+}
+
+// SupportsSingleGet 回傳實體端點是否支援 single get（/{Entity}/{id}）；未知實體回 false。
+func SupportsSingleGet(e Entity) bool {
+	spec, ok := entitySpecs[e]
+	return ok && spec.singlePath != ""
 }
 
 // Run 依 Window 抓取單一 entity：逐頁累積，每達 writeChunkRows 列即分塊寫入 DB，
@@ -157,6 +164,42 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 		}
 	}
 	slog.Info("批量同步完成", "tenant", tenantID, "entity", entity, "ids", len(ids), "count", a.total)
+	return nil
+}
+
+// RunSingle 用 single get 端點抓取單一實體；不推進 cursor。
+// Xero single get response 格式與 list 相同（包在 array 裡），可複用 decodePage。
+func (r *Runner) RunSingle(ctx context.Context, tenantID string, entity Entity, id string) error {
+	spec, ok := entitySpecs[entity]
+	if !ok {
+		return fmt.Errorf("single get %s: 未知的實體", entity)
+	}
+	if spec.singlePath == "" {
+		return fmt.Errorf("single get %s: 端點不支援 single get", entity)
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	path := fmt.Sprintf(spec.singlePath, id)
+	body, err := r.client.Get(ctx, tenantID, path, nil, nil)
+	if err != nil {
+		return fmt.Errorf("single get %s/%s: %w", entity, id, err)
+	}
+	syncedAt := time.Now().UTC()
+	b, n, _, err := decodePage(entity, body, tenantID, syncedAt)
+	if err != nil {
+		return fmt.Errorf("single get %s/%s: %w", entity, id, err)
+	}
+	if n == 0 || r.store == nil {
+		return nil
+	}
+	batch := b
+	batch.TenantID = tenantID
+	batch.Entity = string(entity)
+	if err := r.store.ApplyBatch(ctx, batch); err != nil {
+		return fmt.Errorf("single get %s/%s: %w", entity, id, err)
+	}
+	slog.Info("single get 同步完成", "tenant", tenantID, "entity", entity, "id", id)
 	return nil
 }
 

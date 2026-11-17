@@ -72,15 +72,17 @@ type webhookTarget struct {
 
 // WebhookHandler 處理 POST /webhook：驗簽、解析、去重入列。
 type WebhookHandler struct {
-	store      *store.Store
-	signingKey []byte
-	buffer     *WebhookBuffer
+	store        *store.Store
+	signingKey   []byte
+	buffer       *WebhookBuffer
+	singleBuffer *SingleGetBuffer
 }
 
 // NewWebhookHandler 建立 webhook handler；signingKey 為 Xero webhook signing key，
-// buf 可為 nil（不啟用 buffer 聚合，事件僅入列 sync_jobs 交由 cron 處理）。
-func NewWebhookHandler(s *store.Store, signingKey []byte, buf *WebhookBuffer) *WebhookHandler {
-	return &WebhookHandler{store: s, signingKey: signingKey, buffer: buf}
+// buf 可為 nil（不啟用 buffer 聚合，事件僅入列 sync_jobs 交由 cron 處理），
+// singleBuf 可為 nil（不支援批量 IDs 的實體改由 single get buffer 處理）。
+func NewWebhookHandler(s *store.Store, signingKey []byte, buf *WebhookBuffer, singleBuf *SingleGetBuffer) *WebhookHandler {
+	return &WebhookHandler{store: s, signingKey: signingKey, buffer: buf, singleBuffer: singleBuf}
 }
 
 // Handle 依 Xero 規則回應：非 POST 405、驗簽失敗 401、body 不合法 400、成功 200。
@@ -122,13 +124,21 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// dispatchToBuffer 把已入列事件派送給 buffer 聚合；未啟用 buffer（nil）時直接略過。
+// dispatchToBuffer 把已入列事件依實體能力派送至 batch buffer 或 single buffer；
+// 兩者皆未啟用（nil）時直接略過，事件僅留 sync_jobs 交由 cron 增量處理。
 func (h *WebhookHandler) dispatchToBuffer(targets []webhookTarget) {
-	if h.buffer == nil {
-		return
-	}
 	for _, t := range targets {
-		h.buffer.Add(t.tenantID, pkgsync.Entity(t.entity), t.xeroID)
+		entity := pkgsync.Entity(t.entity)
+		if pkgsync.SupportsBatchIDs(entity) {
+			if h.buffer != nil {
+				h.buffer.Add(t.tenantID, entity, t.xeroID)
+			}
+			continue
+		}
+		if pkgsync.SupportsSingleGet(entity) && h.singleBuffer != nil {
+			h.singleBuffer.Add(t.tenantID, entity, t.xeroID)
+			continue
+		}
 	}
 }
 
