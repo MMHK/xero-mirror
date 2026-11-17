@@ -81,6 +81,20 @@ cursor_time = IF(
 - `Cursor` 模式送實際水位 → 只前進不後退；較舊的值或整批 `xero_updated_at` 皆為 `nil` 時也不推進。
 - 最後一次 flush 的水位與該 chunk 資料同交易提交，因此「水位前進」與「該批資料寫入成功」必然同時發生或同時不發生；中途 flush 一律送 `NULL`，不推進水位。
 
+### 4.1 狀態轉換時機
+
+`sync_state.status` 遵循 `idle → running → idle/failed` 狀態機：
+
+| 時機 | 方法 | status | last_error | cursor_time |
+|------|------|--------|------------|-------------|
+| `Run`／`RunBatch` 開始前 | `MarkSyncRunning` | `running` | `NULL` | 不變 |
+| `ApplyBatch` 成功（整輪最後一次 flush） | `UpsertSyncState`（交易內） | `idle` | `NULL` | 依 Window 推進或保留 |
+| `Run`／`RunBatch` 失敗（defer） | `MarkSyncFailed` | `failed` | 錯誤訊息 | 不變 |
+
+- `MarkSyncRunning` 與 `MarkSyncFailed` 用 `s.db.ExecContext`，不用交易（失敗時資料交易已回滾，無法用交易）。
+- `r.store == nil` 時跳過狀態轉換（維持無 DB 的單元測試行為）。
+- `defer MarkSyncFailed` 確保所有 return path 都會標記 failed；忽略 `MarkSyncFailed` 自身的錯誤，避免掩蓋原始錯誤。
+
 ## 5. 失敗語意
 
 | 層級 | 行為 |

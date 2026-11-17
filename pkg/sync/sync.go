@@ -93,7 +93,7 @@ func SupportsSingleGet(e Entity) bool {
 // Run 依 Window 抓取單一 entity：逐頁累積，每達 writeChunkRows 列即分塊寫入 DB，
 // 全部頁完成後再 flush 一次並帶入本輪水位。
 // 抓取過程不推進 cursor，避免中途失敗後用較新水位略過尚未抓到的資料。
-func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error {
+func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) (retErr error) {
 	spec, ok := entitySpecs[entity]
 	if !ok {
 		return fmt.Errorf("同步 %s: 未知的實體", entity)
@@ -101,6 +101,22 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 	if err := validateWindow(w); err != nil {
 		return fmt.Errorf("同步 %s: %w", entity, err)
 	}
+
+	// 標記 running（store 為 nil 時跳過，維持測試行為）
+	if r.store != nil {
+		if err := r.store.MarkSyncRunning(ctx, tenantID, string(entity)); err != nil {
+			return fmt.Errorf("標記同步開始 %s: %w", entity, err)
+		}
+	}
+
+	// 失敗時標記 failed（defer + named return）
+	defer func() {
+		if retErr != nil && r.store != nil {
+			// 忽略 MarkSyncFailed 的錯誤，避免掩蓋原始錯誤
+			_ = r.store.MarkSyncFailed(ctx, tenantID, string(entity), retErr.Error())
+		}
+	}()
+
 	query, headers := buildRequest(spec, w)
 	a := &pageApplier{
 		tenantID: tenantID, entity: entity,
@@ -134,7 +150,7 @@ const maxBatchIDs = 30
 
 // RunBatch 以 ?IDs= 批量抓取指定 entry；只支援 supportsBatchIDs 的端點。
 // webhook 觸發不得推進 cursor（trackCursor=false），中途仍依 writeChunkRows 分塊 flush。
-func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error {
+func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) (retErr error) {
 	spec, ok := entitySpecs[entity]
 	if !ok {
 		return fmt.Errorf("批量同步 %s: 未知的實體", entity)
@@ -146,6 +162,22 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 	if len(unique) == 0 {
 		return nil
 	}
+
+	// 標記 running（store 為 nil 時跳過，維持測試行為）
+	if r.store != nil {
+		if err := r.store.MarkSyncRunning(ctx, tenantID, string(entity)); err != nil {
+			return fmt.Errorf("標記同步開始 %s: %w", entity, err)
+		}
+	}
+
+	// 失敗時標記 failed（defer + named return）
+	defer func() {
+		if retErr != nil && r.store != nil {
+			// 忽略 MarkSyncFailed 的錯誤，避免掩蓋原始錯誤
+			_ = r.store.MarkSyncFailed(ctx, tenantID, string(entity), retErr.Error())
+		}
+	}()
+
 	a := &pageApplier{
 		tenantID: tenantID, entity: entity,
 		store: r.store, ctx: ctx,

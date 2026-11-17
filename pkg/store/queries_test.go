@@ -102,3 +102,56 @@ func TestUpsertInvoiceLongNumber(t *testing.T) {
 		"SELECT number FROM xero_invoices WHERE tenant_id = ? AND invoice_id = ?", "t1", "inv-long").Scan(&got))
 	require.Equal(t, number, got)
 }
+
+// TestMarkSyncRunning 驗證首次呼叫 INSERT 列（status='running'）；第二次呼叫 UPDATE（last_error 清空）。
+func TestMarkSyncRunning(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.MarkSyncRunning(ctx, "t-running", "INVOICE"))
+	st, err := s.GetSyncState(ctx, "t-running", "INVOICE")
+	require.NoError(t, err)
+	require.Equal(t, "running", st.Status)
+	require.Nil(t, st.LastError)
+
+	// 模擬先前有錯誤，再標記 running 應清空 last_error
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-running", "INVOICE", "舊錯誤"))
+	require.NoError(t, s.MarkSyncRunning(ctx, "t-running", "INVOICE"))
+	st, err = s.GetSyncState(ctx, "t-running", "INVOICE")
+	require.NoError(t, err)
+	require.Equal(t, "running", st.Status)
+	require.Nil(t, st.LastError)
+}
+
+// TestMarkSyncFailed 驗證首次呼叫 INSERT 列（status='failed', last_error='...'）；第二次呼叫 UPDATE。
+func TestMarkSyncFailed(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-failed", "INVOICE", "首次失敗"))
+	st, err := s.GetSyncState(ctx, "t-failed", "INVOICE")
+	require.NoError(t, err)
+	require.Equal(t, "failed", st.Status)
+	require.NotNil(t, st.LastError)
+	require.Equal(t, "首次失敗", *st.LastError)
+
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-failed", "INVOICE", "第二次失敗"))
+	st, err = s.GetSyncState(ctx, "t-failed", "INVOICE")
+	require.NoError(t, err)
+	require.Equal(t, "failed", st.Status)
+	require.Equal(t, "第二次失敗", *st.LastError)
+}
+
+// TestMarkSyncFailedPreservesCursor 驗證 MarkSyncFailed 不會動到 cursor_time。
+func TestMarkSyncFailedPreservesCursor(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cursor := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, s.ApplyBatch(ctx, Batch{
+		TenantID: "t-cursor-preserve", Entity: "INVOICE", Cursor: &cursor,
+	}))
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-cursor-preserve", "INVOICE", "失敗但 cursor 不動"))
+	st, err := s.GetSyncState(ctx, "t-cursor-preserve", "INVOICE")
+	require.NoError(t, err)
+	require.NotNil(t, st.CursorTime)
+	require.True(t, st.CursorTime.Equal(cursor), "MarkSyncFailed 不得動到 cursor_time")
+	require.Equal(t, "failed", st.Status)
+}

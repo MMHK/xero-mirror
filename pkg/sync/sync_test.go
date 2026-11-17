@@ -567,3 +567,41 @@ func TestSupportsSingleGetCoversExpectedEntities(t *testing.T) {
 	require.False(t, SupportsSingleGet(EntityInvoices), "Invoices 支援 batch IDs，不需要 single get")
 	require.False(t, SupportsSingleGet(EntityContacts), "Contacts 支援 batch IDs，不需要 single get")
 }
+
+// TestRunMarksRunningThenIdle 驗證成功流程：先標記 running，最終 status='idle'。
+func TestRunMarksRunningThenIdle(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t-status-ok"
+	r, st := newDBRunner(t, func(w http.ResponseWriter, _ *http.Request) {
+		// 回傳一筆資料，確保 ApplyBatch 被呼叫、status 更新為 idle
+		fmt.Fprint(w, `{"Invoices":[{"InvoiceID":"inv-ok-1","Total":10.0000}]}`)
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, r.Run(ctx, tenant, EntityInvoices, Window{}))
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.Equal(t, "idle", got.Status, "成功後 status 應為 idle")
+	require.Nil(t, got.LastError)
+}
+
+// TestRunMarksFailedOnError 驗證 mock 400 錯誤後 status='failed'，last_error 非空，cursor 不變。
+func TestRunMarksFailedOnError(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t-status-fail"
+	cursor := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	r, st := newDBRunner(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	// 先寫入 cursor 水位
+	require.NoError(t, st.ApplyBatch(ctx, store.Batch{
+		TenantID: tenant, Entity: string(EntityInvoices), Cursor: &cursor,
+	}))
+	require.Error(t, r.Run(ctx, tenant, EntityInvoices, Window{Cursor: &cursor}))
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.Equal(t, "failed", got.Status, "失敗後 status 應為 failed")
+	require.NotNil(t, got.LastError, "失敗後 last_error 應非空")
+	require.NotNil(t, got.CursorTime)
+	require.True(t, got.CursorTime.Equal(cursor), "失敗不得推進 cursor")
+}

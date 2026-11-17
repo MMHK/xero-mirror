@@ -62,6 +62,23 @@ const selectSyncStateSQL = `
 SELECT tenant_id, entity, cursor_time, last_run_at, status, last_error
 FROM sync_state WHERE tenant_id = ? AND entity = ?`
 
+// markSyncRunningSQL 標記同步開始：列不存在時 INSERT（首次同步），列存在時只更新 status 與清除 last_error，
+// 保留 cursor_time 與 last_run_at。
+const markSyncRunningSQL = `
+INSERT INTO sync_state (tenant_id, entity, status, last_error)
+VALUES (?, ?, 'running', NULL)
+ON DUPLICATE KEY UPDATE
+    status = 'running',
+    last_error = NULL`
+
+// markSyncFailedSQL 標記同步失敗：列不存在時 INSERT（首次同步就失敗），列存在時只更新 status 與 last_error。
+const markSyncFailedSQL = `
+INSERT INTO sync_state (tenant_id, entity, status, last_error)
+VALUES (?, ?, 'failed', ?)
+ON DUPLICATE KEY UPDATE
+    status = 'failed',
+    last_error = VALUES(last_error)`
+
 const insertWebhookEventSQL = `
 INSERT INTO webhook_events (
 	event_id, tenant_id, entity, xero_id, event_date, received_at, processed_at
@@ -281,6 +298,26 @@ func (s *Store) GetSyncState(ctx context.Context, tenantID, entity string) (Sync
 		return SyncState{}, fmt.Errorf("查詢 sync_state %s/%s: %w", tenantID, entity, err)
 	}
 	return st, nil
+}
+
+// MarkSyncRunning 標記同步開始：列不存在時 INSERT，列存在時只更新 status 與清除 last_error，
+// 保留 cursor_time 與 last_run_at。不用交易（status 轉換獨立於資料交易）。
+func (s *Store) MarkSyncRunning(ctx context.Context, tenantID, entity string) error {
+	_, err := s.db.ExecContext(ctx, markSyncRunningSQL, tenantID, entity)
+	if err != nil {
+		return fmt.Errorf("標記同步開始 %s/%s: %w", tenantID, entity, err)
+	}
+	return nil
+}
+
+// MarkSyncFailed 標記同步失敗：列不存在時 INSERT，列存在時只更新 status 與 last_error。
+// 不用交易（失敗時資料交易已回滾，無法使用交易）。
+func (s *Store) MarkSyncFailed(ctx context.Context, tenantID, entity, errMsg string) error {
+	_, err := s.db.ExecContext(ctx, markSyncFailedSQL, tenantID, entity, errMsg)
+	if err != nil {
+		return fmt.Errorf("標記同步失敗 %s/%s: %w", tenantID, entity, err)
+	}
+	return nil
 }
 
 // InsertWebhookEvent 以 event_id 去重寫入；duplicate 表示該事件已存在。
