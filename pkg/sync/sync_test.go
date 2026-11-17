@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -430,4 +431,97 @@ func TestRunEntityMonthOnlyRequestsEntity(t *testing.T) {
 	state, err := st.GetSyncState(ctx, tenant, string(EntityPayments))
 	require.NoError(t, err, "資料寫入後應有 sync_state")
 	require.Nil(t, state.CursorTime, "月度模式不得推進 cursor")
+}
+
+// TestRunSendsIfModifiedSinceByEntity 驗證 CreditNotes／Payments 帶 Cursor 時送出
+// If-Modified-Since，格式為 http.TimeFormat（表驅動）。
+func TestRunSendsIfModifiedSinceByEntity(t *testing.T) {
+	cursor := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	for _, entity := range []Entity{EntityCreditNotes, EntityPayments} {
+		got := make(chan string, 1)
+		r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+			got <- req.Header.Get("If-Modified-Since")
+			fmt.Fprint(w, emptyByEntity[entity])
+		})
+		require.NoError(t, r.Run(context.Background(), "t1", entity, Window{Cursor: &cursor}))
+		require.Equal(t, cursor.Format(http.TimeFormat), <-got, string(entity))
+	}
+}
+
+// TestRunOmitsIfModifiedSinceWithoutCursor 驗證首跑（Cursor 為 nil）不送 If-Modified-Since。
+func TestRunOmitsIfModifiedSinceWithoutCursor(t *testing.T) {
+	for _, entity := range []Entity{EntityCreditNotes, EntityPayments} {
+		got := make(chan bool, 1)
+		r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+			got <- req.Header.Get("If-Modified-Since") != ""
+			fmt.Fprint(w, emptyByEntity[entity])
+		})
+		require.NoError(t, r.Run(context.Background(), "t1", entity, Window{}))
+		require.False(t, <-got, string(entity))
+	}
+}
+
+// invoicePage 產生 n 筆 invoice 的單頁 JSON，UpdatedDateUTC 全部為 at（毫秒精度）。
+func invoicePage(prefix string, n int, at time.Time) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = fmt.Sprintf(
+			`{"InvoiceID":"%s-%d","Total":1.0000,"UpdatedDateUTC":"/Date(%d+0000)/"}`,
+			prefix, i, at.UnixMilli())
+	}
+	return `{"Invoices":[` + strings.Join(items, ",") + `]}`
+}
+
+// TestRunChunkedWriteAdvancesCursor 驗證 600 筆分 6 頁（超過 writeChunkRows）會中途 flush，
+// 最終資料完整，且 cursor 只在整輪結束時推進到最大 UpdatedDateUTC。
+func TestRunChunkedWriteAdvancesCursor(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t4chunk-ok"
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	r, st := newDBRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+		if page > 6 {
+			fmt.Fprint(w, `{"Invoices":[]}`)
+			return
+		}
+		fmt.Fprint(w, invoicePage(fmt.Sprintf("inv-%d", page), 100, base.Add(time.Duration(page)*time.Minute)))
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, r.Run(ctx, tenant, EntityInvoices, Window{}))
+	n, err := st.CountInvoicesByTenant(ctx, tenant)
+	require.NoError(t, err)
+	require.Equal(t, 600, n, "六頁共 600 筆都應寫入")
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.NotNil(t, got.CursorTime)
+	require.True(t, got.CursorTime.Equal(base.Add(6*time.Minute)), "cursor 應為最大 UpdatedDateUTC")
+}
+
+// TestRunChunkedWriteFailureKeepsOldCursor 驗證第 7 頁失敗時，前段已 flush 的資料留在 DB，
+// 但 cursor 不前進。
+func TestRunChunkedWriteFailureKeepsOldCursor(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t4chunk-fail"
+	old := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	r, st := newDBRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+		if page > 6 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, invoicePage(fmt.Sprintf("inv-fail-%d", page), 100, base.Add(time.Duration(page)*time.Minute)))
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, st.ApplyBatch(ctx, store.Batch{
+		TenantID: tenant, Entity: string(EntityInvoices), Cursor: &old,
+	}))
+	require.Error(t, r.Run(ctx, tenant, EntityInvoices, Window{Cursor: &old}))
+	n, err := st.CountInvoicesByTenant(ctx, tenant)
+	require.NoError(t, err)
+	require.Equal(t, 500, n, "DB 應只有第一次 flush 的 500 筆")
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.NotNil(t, got.CursorTime)
+	require.True(t, got.CursorTime.Equal(old), "抓取失敗不得推進 cursor")
 }

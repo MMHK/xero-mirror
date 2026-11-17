@@ -62,8 +62,8 @@ var entitySpecs = map[Entity]entitySpec{
 	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: true},
 	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
 	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true},
-	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
-	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
+	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false},
+	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false},
 }
 
 // Entities 回傳固定順序的五個同步實體；cron 與整 tenant 編排都照此順序執行。
@@ -83,7 +83,8 @@ func SupportsBatchIDs(e Entity) bool {
 	return ok && spec.supportsBatchIDs
 }
 
-// Run 依 Window 抓取單一 entity：所有頁抓完、映射完成後只寫一次 DB。
+// Run 依 Window 抓取單一 entity：逐頁累積，每達 writeChunkRows 列即分塊寫入 DB，
+// 全部頁完成後再 flush 一次並帶入本輪水位。
 // 抓取過程不推進 cursor，避免中途失敗後用較新水位略過尚未抓到的資料。
 func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error {
 	spec, ok := entitySpecs[entity]
@@ -96,9 +97,9 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 	query, headers := buildRequest(spec, w)
 	a := &pageApplier{
 		tenantID: tenantID, entity: entity,
+		store: r.store, ctx: ctx,
 		syncedAt: time.Now().UTC(), trackCursor: w.MonthStart == nil,
 	}
-	a.batch.TenantID = tenantID
 	if spec.paginated {
 		if err := r.client.GetPages(ctx, tenantID, spec.path, query, headers, a.handle); err != nil {
 			return fmt.Errorf("同步 %s: %w", entity, err)
@@ -109,11 +110,11 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 		return fmt.Errorf("同步 %s: %w", entity, err)
 	}
 	if a.total > 0 {
-		a.batch.Entity = string(entity)
+		cursor := (*time.Time)(nil)
 		if a.trackCursor {
-			a.batch.Cursor = a.maxAt
+			cursor = a.maxAt
 		}
-		if err := r.store.ApplyBatch(ctx, a.batch); err != nil {
+		if err := a.flush(cursor); err != nil {
 			return fmt.Errorf("同步 %s: %w", entity, err)
 		}
 	}
@@ -125,7 +126,7 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 const maxBatchIDs = 30
 
 // RunBatch 以 ?IDs= 批量抓取指定 entry；只支援 supportsBatchIDs 的端點。
-// webhook 觸發不得推進 cursor（trackCursor=false），全部批次成功後才一次寫入。
+// webhook 觸發不得推進 cursor（trackCursor=false），中途仍依 writeChunkRows 分塊 flush。
 func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error {
 	spec, ok := entitySpecs[entity]
 	if !ok {
@@ -140,9 +141,9 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 	}
 	a := &pageApplier{
 		tenantID: tenantID, entity: entity,
+		store: r.store, ctx: ctx,
 		syncedAt: time.Now().UTC(), trackCursor: false,
 	}
-	a.batch.TenantID = tenantID
 	for _, chunk := range chunkIDs(unique, maxBatchIDs) {
 		query := url.Values{}
 		query.Set("IDs", strings.Join(chunk, ","))
@@ -151,8 +152,7 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 		}
 	}
 	if a.total > 0 {
-		a.batch.Entity = string(entity)
-		if err := r.store.ApplyBatch(ctx, a.batch); err != nil {
+		if err := a.flush(nil); err != nil {
 			return fmt.Errorf("批量同步 %s: %w", entity, err)
 		}
 	}
@@ -303,19 +303,27 @@ func chunkIDs(ids []string, size int) [][]string {
 	return chunks
 }
 
+// writeChunkRows 是單次 flush 的累積上限；約每 5 頁（每頁 100 筆）寫一次 DB。
+const writeChunkRows = 500
+
 // pageApplier 彙總一次 Run 的抓取結果；handle 符合 GetPages 的回呼簽名。
+// 累積達 writeChunkRows 即 flush，避免全部頁面同時佔用記憶體與拉長交易。
 type pageApplier struct {
 	tenantID    string
 	entity      Entity
+	store       *store.Store
+	ctx         context.Context
 	syncedAt    time.Time
 	trackCursor bool
 	batch       store.Batch
 	maxAt       *time.Time
 	total       int
+	written     int
 }
 
-// handle 解析單頁並累積到批次；抓取過程不寫 DB，全部頁完成後才一次 ApplyBatch。
-func (a *pageApplier) handle(_ int, body []byte) (int, error) {
+// handle 解析單頁並累積到批次；達 writeChunkRows 即 flush（cursor 留到最後一次）。
+// page 供 debug log 追蹤進度；maxAt 與 total 跨所有頁累積，不因 flush 重置。
+func (a *pageApplier) handle(page int, body []byte) (int, error) {
 	b, n, maxAt, err := decodePage(a.entity, body, a.tenantID, a.syncedAt)
 	if err != nil {
 		return 0, err
@@ -332,7 +340,45 @@ func (a *pageApplier) handle(_ int, body []byte) (int, error) {
 		a.maxAt = latest(a.maxAt, maxAt)
 	}
 	a.total += n
+	slog.Debug("抓取分頁", "tenant", a.tenantID, "entity", a.entity, "page", page, "count", n)
+	if a.pending() >= writeChunkRows {
+		if err := a.flush(nil); err != nil {
+			return 0, err
+		}
+	}
 	return n, nil
+}
+
+// flush 把目前累積的資料寫入 DB；Batch 的 TenantID／Entity 由 flush 自行填入，
+// 成功後只清空五個 slice，失敗時保留累積內容並直接回錯。
+// cursor 只有整輪最後一次 flush 會帶入；store 為 nil（無 DB 的單元測試）時直接略過，不 panic。
+func (a *pageApplier) flush(cursor *time.Time) error {
+	if a.store == nil {
+		return nil
+	}
+	b := a.batch
+	b.TenantID = a.tenantID
+	b.Entity = string(a.entity)
+	b.Cursor = cursor
+	rows := a.pending()
+	if err := a.store.ApplyBatch(a.ctx, b); err != nil {
+		return err
+	}
+	a.batch.Contacts = nil
+	a.batch.Accounts = nil
+	a.batch.Invoices = nil
+	a.batch.CreditNotes = nil
+	a.batch.Payments = nil
+	a.written += rows
+	slog.Debug("分塊寫入", "tenant", a.tenantID, "entity", a.entity,
+		"rows", rows, "total", a.written, "with_cursor", cursor != nil)
+	return nil
+}
+
+// pending 回傳尚未寫入 DB 的列數。
+func (a *pageApplier) pending() int {
+	return len(a.batch.Contacts) + len(a.batch.Accounts) + len(a.batch.Invoices) +
+		len(a.batch.CreditNotes) + len(a.batch.Payments)
 }
 
 // decodePage 依實體分派到對應解碼函式；不認識的實體回錯誤。
