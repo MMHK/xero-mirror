@@ -4,7 +4,7 @@
 
 **建立日期**: 2026-11-16
 **最後更新**: 2026-11-17
-**狀態**: 🟢 進行中（任務 1–8 完成並已 commit；續行任務 9a）
+**狀態**: 🟢 完成（待 commit；任務 1–14 ✅、任務 15 ⏭️）
 **優先級**: High
 
 ## 背景與目標
@@ -44,6 +44,9 @@
 | 2026-11-16 | **Webhook buffer + batch get**：收集多個 entry IDs，去重後批量抓取，節省 API 配額 | `doc/spec.md` §5、§7.0、`doc/modules/webhook-buffer.md`、任務 9 |
 | 2026-11-17 | **確認純唯讀同步**：本服務不發 `PUT`／`POST`／`DELETE` 給 Xero，只做 GET 鏡射，因此不會觸發自身 webhook，也無需迴圈防護 | 任務 9a–9e；風險表無需新增 webhook 迴圈項 |
 | 2026-11-17 | **buffer 前置作業**：`entitySpec` 加 `supportsBatchIDs`、`.env.example` 加 buffer 變數、spec §7.0 落地；`pkg/config` 讀取留到任務 9c 一起做 | `pkg/sync/sync.go`、`.env.example`、`doc/spec.md`、任務 9b／9c |
+| 2026-11-17 | **webhook 去重鍵**：Xero event 無 `eventId`，改 `resourceId + "_" + eventDate(UnixMilli)`；跨 tenant 不加維度（GUID 全域唯一）；入列失敗回 500 讓 Xero 重送（spec §7 明文例外） | `pkg/handler/webhook.go`、`doc/spec.md` §7、任務 9a |
+| 2026-11-17 | **sub agent 模型**：改用 `coding-plan/ark-code-latest`（原 general／code-reviewer 模型回報不支援 function calling） | 派工流程（不影響程式） |
+| 2026-11-17 | **buffer 範圍**：以 (tenantID, entity) 分組；只對 `supportsBatchIDs` 實體呼叫 `RunBatch`；CreditNotes／Payments 只記 log 交 cron 增量（不做逐個 fallback）；webhook 批量成功會把 `sync_state.status` 寫回 `idle`，目前無 `failed` 寫入路徑，暫不加 `ApplyBatch` 選項 | `pkg/handler`、`doc/modules/webhook-buffer.md`、任務 9c |
 
 ## 架構決策（對齊 AGENTS.md）
 
@@ -53,7 +56,7 @@
 | 單一同步核心 | `sync.Run(ctx, tenantID, entity, Window)`；`Window` 只有 Cursor 或 MonthStart/MonthEnd，內部流程相同 | §1.3 |
 | 批量同步 | `sync.RunBatch(ctx, tenantID, entity, ids)`；用於 webhook buffer flush，只支援有 `IDs` 參數的端點 | §5、§7.0 |
 | 資料流 | `webhook → webhook_events/sync_jobs 入列 → buffer 收集 → 同步核心`；`cron → 同步核心`；`同步核心 → pkg/xero → pkg/store` | §1.3、§5、§7.0 |
-| Webhook buffer | 收集多個 entry IDs，去重後批量抓取；timer 到期或 batch size 觸發 flush；不支援批量 IDs 的端點走逐個處理或 cursor 增量 | §7.0、`doc/modules/webhook-buffer.md` |
+| Webhook buffer | 收集多個 entry IDs，去重後批量抓取；timer 到期或 batch size 觸發 flush；不支援批量 IDs 的實體只記 log 交 cron 增量（不做逐個 fallback） | §7.0、`doc/modules/webhook-buffer.md` |
 | 增量水位 | `sync_state(tenant_id, entity).cursor_time`，與資料 upsert **同一交易**提交 | §6 |
 | 限流 | `x/time/rate` per-tenant limiter（5 併發 / ~60 次分 / 每日上限）；429 讀 `Retry-After` | §5 |
 | 金額 | 全程 `string`，DB `DECIMAL(18,4)`，禁 `float64` | §4、§6 |
@@ -92,41 +95,56 @@
 | 6 | `pkg/xero` client：tenant header、分頁依端點能力、429/`Retry-After`、per-tenant limiter（5 併發 / ~60 次分 / 每日上限）、`XeroTime`、context + timeout | ✅ 完成 | general | review ✅；10 測試綠；`client.go` 333 行 |
 | 7 | `pkg/store` 交易編排：`Batch` + `ApplyBatch`（資料 upsert 與 cursor 同交易） | ✅ 完成 | general | review ✅；7 個 store 測試綠（含 rollback 停在 T1） |
 | 8 | `pkg/sync` 核心：`Runner.Run(ctx, tenantID, Entity, Window)` fetch → upsert；cursor 與月度視窗共用；冪等 | ✅ 完成 | general | 兩輪 review；8 個 sync 測試綠（含 DB 的 cursor 不倒退） |
-| 9a | `pkg/handler` webhook 基礎：驗簽（raw body + HMAC-SHA256 + constant-time）、去重入列（`webhook_events` + `sync_jobs`）、`POST /webhook` 路由 | 🔄 進行中 | general | 401／400／200 語意；先驗簽才 `json.Unmarshal`；立即回 200 再入列 |
-| 9b | `pkg/sync` 批量同步：`Runner.RunBatch(ctx, tenantID, entity, ids)`；支援 `?IDs=uuid1,uuid2,...` 的端點（Invoices、Contacts） | ⬜ 待處理 | — | `supportsBatchIDs` 已在 `entitySpec`；不支援批量 IDs 的端點（CreditNotes、Payments）退回逐個處理；URL 長度限制約 40 個 IDs，超過需分批 |
-| 9c | `pkg/handler` webhook buffer：收集 entry IDs、去重、timer 到期或 batch size 觸發 flush、呼叫 `sync.RunBatch` | ⬜ 待處理 | — | 設計見 `doc/modules/webhook-buffer.md`；本任務一併補 `pkg/config` 讀取 `WEBHOOK_BUFFER_SIZE`／`WEBHOOK_BUFFER_DELAY` |
-| 9d | `pkg/handler` health + admin：`GET /health`（DB ping）、`POST /admin/sync`（手動觸發）；路由表面照 spec §7.1，其他方法 405 | ⬜ 待處理 | — | handler 只做參數解析，業務邏輯轉 `pkg/sync` |
-| 9e | `pkg/handler` cron + graceful shutdown：`robfig/cron` 註冊增量 sync job、`http.Server.Shutdown` 等待當前 sync 收尾、buffer flush 剩餘 entries | ⬜ 待處理 | — | `runServe` 在 `commands.go` 接 config + `store.OpenMigrated`；SIGINT/SIGTERM 先停 cron → shutdown HTTP → flush buffer → exit |
-| 10 | `auth` subcommand：一次性授權 `localhost:{3000-9000}/callback`，token 加密落地 MySQL | ⬜ 待處理 | — | 禁 `127.0.0.1`；`runAuth` 同樣先 config + `store.OpenMigrated` |
-| 11 | 測試與工具：`tests/testing.go`、`docker-compose.test.yml`、必測三項（冪等、失敗後 cursor 可續跑、webhook 簽章 401） | ⬜ 待處理 | — | 無 DB 時 `t.Skip()` |
-| 12 | `doc/modules/*.md` 與 `doc/spec.md` 同步；`go fmt` + `go vet` + `go test ./...` 收尾 | ⬜ 待處理 | — | §9、§14 |
+| 9a | `pkg/handler` webhook 基礎：驗簽（raw body + HMAC-SHA256 + constant-time）、去重入列（`webhook_events` + `sync_jobs`）、`POST /webhook` 路由 | ✅ 完成 | general（ark-code-latest） | 兩輪 review；去重鍵 `resourceId_eventDateUnixMilli`；DB 測試以 `GET_LOCK('xero-mirror:test')` 跨 package 序列化；spec §7 已補 500／400／去重鍵 |
+| 9b | `pkg/sync` 批量同步：`Runner.RunBatch(ctx, tenantID, entity, ids)`；支援 `?IDs=uuid1,uuid2,...` 的端點（Invoices、Contacts） | ✅ 完成 | general（ark-code-latest） | review ✅；去重保序、每批 30、`trackCursor=false`（不推進 cursor）、全部成功才一次 `ApplyBatch`；3 測試綠 |
+| 9c | `pkg/handler` webhook buffer：收集 entry IDs、去重、timer 到期或 batch size 觸發 flush、呼叫 `sync.RunBatch` | ✅ 完成 | general（ark-code-latest） | 兩輪 review（修 `shutdownCtx` data race）；`SupportsBatchIDs`、config 新變數、`-race -count=10` 綠；模組 doc 已同步 |
+| 9d | `pkg/handler` health + admin：`GET /health`（DB ping）、`POST /admin/sync`（手動觸發）；路由表面照 spec §7.1，其他方法 405 | ✅ 完成 | general（ark-code-latest） | review ✅ 無阻塞；`NewMux`、entity 別名表、UTC 半開月視窗、`ErrNoRows` 視為全量；spec 已補 admin 部署邊界 |
+| 9e | `pkg/handler` cron + graceful shutdown：`robfig/cron` 註冊增量 sync job、`http.Server.Shutdown` 等待當前 sync 收尾、buffer flush 剩餘 entries | ✅ 完成 | general（ark-code-latest） | 兩輪 review；ctx 生命週期修正（`cronCtx`／`bufCtx` 獨立、shutdown 30s 上限、`SkipIfStillRunning`）；煙霧 exit 0 |
+| 10 | `auth` subcommand：一次性授權 `localhost:{3000-9000}/callback`，token 加密落地 MySQL | ✅ 完成 | general（deepseek-flash） | 合併審查通過；state 驗證、10 分鐘上限、密文落地；重構與多 tenant refresh 另列任務 14／15 |
+| 14 | `pkg/xero/auth.go` 重構：把 `runAuth` 內授權流程（state、臨時 callback server、tenant 寫入）搬離 `main`，補拒絕／取消／多 tenant 測試 | ✅ 完成 | general（deepseek-flash） | 5 個測試、timeout 切分、多 tenant 部分寫入訊息；`commands.go` 只剩接線 |
+| 15 | 多 tenant refresh token 輪換：同一 refresh token 更新所有 tenant，或改 user 級單飛鎖 | ⏭️ 跳過 | — | 使用者確認**單一 tenant**；改在 spec §6 註明限制即可，不做程式改動 |
+| 11 | 測試與工具：`tests/testing.go`、`docker-compose.test.yml`、必測三項（冪等、失敗後 cursor 可續跑、webhook 簽章 401） | ✅ 完成 | general（deepseek-flash） | 4 份 lock helper 收斂完成；新增 fetch 失敗 cursor 不動測試；`-race` 全綠 |
+| 12 | `doc/modules/*.md` 與 `doc/spec.md` 同步；`go fmt` + `go vet` + `go test ./...` 收尾 | ✅ 完成 | general（deepseek-flash） | 新增 `doc/modules/sync.md`；spec §2 目錄、§3 資料流／規則、§9 指令與 sync 語意、§10 測試 DSN 已同步；計畫收尾 |
+| 13 | `commands.go` `runSync` 接線：`--month YYYY-MM` 回補或依 cursor 增量，逐 tenant 跑五實體 | ✅ 完成 | general（deepseek-flash） | review 後已修：runCronSync 收斂、tenant 級失敗計數、`_test` 守門、`DeleteTenant` cleanup、`ListTenants` 只列 active；測試 3 次全綠 |
 
-**依賴順序**：1 → 2 → 3 → 4 → (5、6) → 7 → 8 → 9a → 9b → 9c → 9d → 9e → 10 → 11 → 12。一次只派一個邏輯任務，完成即送 `code-reviewer` 審查。
+**依賴順序**：1 → 2 → 3 → 4 → (5、6) → 7 → 8 → 9a → 9b → 9c → 9d → 9e → 10 → 11 → 12；任務 13（`runSync` 接線）可在 9e 後並行。一次只派一個邏輯任務，完成即送 `code-reviewer` 審查。
 
-## 目前 repo 狀態（2026-11-17 續行點）
+## 目前 repo 狀態（2026-11-17 收尾）
 
-已 commit（HEAD `89527f0 feat: webhook buffer 與 handler`）：任務 1–8 + 任務 9a 部分。
+已 commit（HEAD `00826a2 chore: local dev docker compose 環境`）：任務 1–8 + 任務 9a（webhook 驗簽／入列）+ dev 環境（`docker-compose.yml`、`scripts/init-dev.sql`、`doc/dev-setup.md`）。
 
-尚未 commit（工作區改動，屬 dev 環境設定）：
+> 註：`89527f0` 的 commit 訊息寫「webhook buffer 與 handler」，實際僅 handler；buffer 屬任務 9c，訊息與內容不符，後續以計畫為準（不改寫歷史）。
 
-| 檔案 | 狀態 |
-|------|------|
-| `docker-compose.yml` | 🔄 新增：dev 環境 MySQL 8.4（port 3307、volume 持久化、healthcheck） |
-| `scripts/init-dev.sql` | 🔄 新增：dev DB 初始化（character set、dev 用戶） |
-| `doc/dev-setup.md` | 🔄 新增：本機開發環境設定文件 |
-| `.env.example` | 🔄 更新：MYSQL_DSN 範例指向 docker compose（port 3307） |
+工作區未 commit（待提交）：任務 9b–9e、10、11、13、14 的程式與測試，加上任務 12 的文件收尾。`git status --short` 主要項目：
+
+```text
+ M .env.example, commands.go, go.mod, go.sum
+ M doc/spec.md, doc/dev-setup.md, doc/modules/webhook-buffer.md, doc/plans/2026-11-16-bootstrap.md
+ M pkg/config/config.go, pkg/config/config_test.go
+ M pkg/handler/webhook.go, pkg/handler/webhook_test.go
+ M pkg/store/queries.go, pkg/store/queries_test.go, pkg/store/store.go, pkg/store/migrate_test.go
+ M pkg/sync/sync.go, pkg/sync/sync_test.go
+?? docker-compose.test.yml, tests/
+?? pkg/handler/{admin.go, buffer.go, buffer_test.go, health.go, mux.go, route_test.go}
+?? pkg/xero/{auth.go, auth_test.go, live_test.go}
+?? doc/plans/2026-11-17-live-xero-tests.md, doc/modules/sync.md
+```
 
 模組現況：
 
 | 檔案 | 狀態 |
 |------|------|
-| `main.go` | ✅ 58 行（入口 + 分派 + usage） |
-| `commands.go` | ✅ 53 行（`runSync` 已接 config + migrate，同步邏輯仍 stub；`runServe`／`runAuth` 仍 stub） |
-| `pkg/config/config.go` | ✅ 驗證齊全；❌ 尚未讀取 `WEBHOOK_BUFFER_SIZE`／`WEBHOOK_BUFFER_DELAY`（排入 9c） |
-| `pkg/xero/{oauth,crypto,connections,token,client,types,time}.go` | ✅ OAuth2 + AES-256-GCM + 單飛 token + client；10 測試綠 |
-| `pkg/store/{store,models,queries,batch,migrate}.go` + `migrations/`（9 組） | ✅ 18 支存取方法、5 個測試；含 webhook 去重與 sync_jobs 入列 |
-| `pkg/sync/{sync,mapping}.go` | ✅ `Runner.Run` 已完成；`RunBatch` 尚未實作（9b） |
-| `pkg/handler/`、`tests/` | ❌ 尚未建立 |
+| `main.go` | ✅ 約 58 行（入口 + 分派 + usage） |
+| `commands.go` | ✅ 約 262 行（`runSync`／`runServe`／`runAuth` 全部接線；cron、`SkipIfStillRunning`、graceful shutdown 已落地） |
+| `pkg/config/config.go` | ✅ 必填驗證；已讀 `XERO_DAILY_CALL_LIMIT`／`WEBHOOK_BUFFER_SIZE`／`WEBHOOK_BUFFER_DELAY` |
+| `pkg/xero/*` | ✅ OAuth2／`Authorize`／AES-256-GCM／單飛 token／client；live 測試未設 env 全 skip |
+| `pkg/store/*` + `migrations/`（9 組） | ✅ 手寫 SQL 存取層、`Batch`／`ApplyBatch`（資料 + cursor 同交易）、`Migrate`、webhook 去重與 `sync_jobs` 入列 |
+| `pkg/sync/*` | ✅ `Run`／`RunBatch`／`RunIncremental`／`RunTenant`／`RunAllIncremental`／`RunAllMonth`／`Entities`／`SupportsBatchIDs` |
+| `pkg/handler/*` | ✅ webhook 驗簽入列、buffer（batch／timer／shutdown flush）、health、admin、mux |
+| `tests/testing.go` | ✅ `RequireTestDatabase`／`LockTestDatabase`／`OpenTestDB`；未設 `TEST_MYSQL_DSN` 即 skip |
+| `doc/` | ✅ `spec.md`、`dev-setup.md`、`modules/{webhook-buffer,sync}.md`、`plans/` ×2 |
+
+任務 1–14 全部 ✅，任務 15（多 tenant refresh 輪換）⏭️ 跳過（使用者確認單一 tenant，限制已寫入 spec §6）。
 
 ## 風險與易踩雷點
 
@@ -143,7 +161,7 @@
 | 9 | 無版本表以外的部署紀錄 → 人工難查「跑到哪支」 | `schema_migrations` 即查詢入口；回滾需人工 `.down.sql` + 刪版本列 |
 | 10 | webhook buffer 記憶體遺失（服務重啟） | buffer 中的 events 已寫入 `sync_jobs`（持久化），重啟後 worker 可繼續處理；接受 buffer 遺失 |
 | 11 | batch IDs 超過 URL 長度限制 | `batchSize` 預設 30（留 buffer）；`RunBatch` 內部可再分批（每批最多 30 個 IDs） |
-| 12 | 不支援批量 IDs 的端點（CreditNotes、Payments）浪費 API 配額 | 改走 cursor 增量或逐個處理；webhook 只記錄到 `sync_jobs`，不立即處理 |
+| 12 | 不支援批量 IDs 的端點（CreditNotes、Payments）浪費 API 配額 | 只記 log、交 cron 增量（不做逐個抓取）；webhook 事件仍寫入 `sync_jobs` 作待辦紀錄 |
 
 ## 人類 Review 記錄
 
@@ -169,11 +187,20 @@
 | 2026-11-16 | code-reviewer（任務 4） | 7 項 non-blocking | 判 ✅ 通過；7 項改善完成 |
 | 2026-11-16 | code-reviewer（任務 5） | 6 項 Medium/Low（`auth_required`、`NewCipher` 型別、零值 expiry、refresh 空值、`ConnectionsURL`、測試缺口） | 修正完成 |
 | 2026-11-16 | code-reviewer（任務 5 複審） | 7 項全過 | 任務 5 標 ✅ |
+| 2026-11-17 | code-reviewer（任務 9a） | 4 阻塞（去重未被測試證明、DB 測試跨 package 互踩、500 與 spec「先回 200」衝突、去重鍵與 spec 不一致）；Low 若干（空 tenantId／resourceId、reason 長度、未支援 category 無 log、405 缺 Allow） | 已派工修正：去重鍵改 `resourceId+eventDate` 毫秒、補 tenant 精準查詢與事件數斷言、DB 測試加 `GET_LOCK` 序列化、spec §7 補 500／去重鍵／400 |
+| 2026-11-17 | code-reviewer（任務 9a 複審） | 4 阻塞全數確認修復；另有 4 項 Low（spec §5 資料流殘留 eventId 文案、`event_id` 長度前提未註記、`lockTestDatabase` 重複、新繞行路徑缺斷言） | spec 已改 `resourceId+eventDate` 並註記長度前提；後 2 項留任務 11；任務 9a 標 ✅ |
+| 2026-11-17 | code-reviewer（任務 9b） | 無阻塞；4 項低（webhook 批量成功會把 `sync_state.status` 蓋回 `idle`、log 記原始 ids 長度、全空白 id 未過濾、缺「中途失敗不寫入」整合測試） | 任務 9b 標 ✅；status 覆寫列入 9c 決策（現階段無 `failed` 寫入路徑，暫不改碼）；其餘留 9c／11 順手處理 |
+| 2026-11-17 | code-reviewer（任務 9c） | 1 阻塞（`shutdownCtx` data race，實機重現）、2 Medium（spec §7.0 舊設計、模組 doc 自相矛盾）、Low（無用 shutdown chan、Handle 41 行、buffer 測試缺口） | 已修：改唯讀 `baseCtx`、Shutdown ctx 只等待、移除死欄位、Handle 抽 helper、spec／模組 doc 同步 |
+| 2026-11-17 | code-reviewer（任務 9c 複審） | 3 項確認修復；race 以 8×200 併發壓力測試驗證；4 項非阻塞（spec §3 RunBatch 舊文案、plan 術語、矩陣註記、`drainTimer`） | 前 3 項已修；`drainTimer` 留 9e；任務 9c 標 ✅ |
+| 2026-11-17 | code-reviewer（任務 9d） | 無阻塞；Low（admin 無認證需文件註記、缺 503／404／month 400 等測試）、Info（admin 無單飛／節流） | spec §7.1 已補 admin 部署邊界；測試缺口留任務 11；單飛評估留 9e；任務 9d 標 ✅ |
+| 2026-11-17 | code-reviewer（任務 9e） | 3 阻塞（`shutdown(Background)` 無限等待、cron job 不可取消與 `db.Close()` 競爭、buffer 最後 flush 用已取消 signal ctx）、Medium（cron 不防重疊）、Low 4 項 | 已修：雙獨立 ctx、30s 總上限、`SkipIfStillRunning`、spec §9 同步；Low 留任務 11/12 |
+| 2026-11-17 | code-reviewer（任務 9e 複審） | 3 阻塞與 M1 確認修復、無回歸；煙霧 exit 0、關機順序正確；2 項非阻塞（總預算語意、缺 shutdown 單元測試） | 任務 9e 標 ✅；測試留任務 11 |
+| 2026-11-17 | code-reviewer（任務 13 與 10 合併） | 無阻塞；2 Medium（多 tenant 共用 refresh token 輪換缺口、auth 流程放 `main` 違反 §2 分層）、Low（authCtx 範圍、部分寫入訊息、測試缺口、測試殘留、lock helper 四份、`errors.New`） | 13／10 標 ✅；分層重構列任務 14、多 tenant refresh 列任務 15（待確認 tenant 數量）；其餘併任務 11/14 清理 |
 
 ## 未決事項
 
-1. tenant 數量：單一 tenant 或多 tenant（表已按多 tenant 設計）。
-2. MySQL 來源：本機既有實例，或補 `docker-compose.yml`。
+1. tenant 數量：✅ 已確認**單一 tenant**（表仍按多 tenant 設計；多 tenant refresh 輪換不支援，見任務 15）。
+2. MySQL 來源：✅ 已解決，用 `docker compose` 啟動 MySQL 8.4（port 3307，見 `doc/dev-setup.md`）。
 3. `auth` subcommand 是否必要（是否已有可匯入的 token）。
 4. `serve` 部署位置（本機／container／雲），影響 cron 與 shutdown。
 5. webhook 註冊：專案內實作 `PUT /webhooks` 一次性指令，或人工在 Xero 後台設定。
@@ -183,4 +210,9 @@
 - 任務 2 續行方式：先 review 現有產出（修 `sqlc.yaml`、`go.mod` 版本），補完驗收再標 ✅，避免重跑整個 scaffold。
 - 派工時一併附：檔案路徑、預期行為、`AGENTS.md` 約束、驗收指令。
 - 未決事項有變動 → 先更新本計畫再開工。
+- **2026-11-17 暫停點**：任務 9a–9e 已完成並複審通過；sub agent 模型（`coding-plan`）5 小時配額用盡，14:31（+08）重置後續做任務 13 → 10 → 11 → 12。工作區大量未 commit 變更，暫停前建議先 commit。
+- **已知限制（後續任務）**：
+  1. `sync_jobs` 目前**沒有 consumer**：webhook 事件只作待辦／審計，實際資料由 cron／`sync` 增量收斂；若需「重啟後補做」，要另外實作 job worker。
+  2. `webhook_events` 無清理機制，長期會持續成長；建議加保留期清理（例如 cron 每日刪 30 天前資料）。
+  3. `tests/testing.go` 的 `OpenTestDB` 目前無人使用，可保留或任務 16 移除。
 

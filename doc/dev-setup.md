@@ -62,7 +62,7 @@ openssl rand -base64 32
 # 建置
 go build -o xero-mirror.exe .
 
-# 首次授權（會開啟瀏覽器）
+# 首次授權（會印出授權 URL，請手動在瀏覽器開啟）
 ./xero-mirror.exe auth
 
 # 啟動常駐服務（cron + webhook + admin）
@@ -162,27 +162,48 @@ docker compose logs mysql
 docker compose exec mysql mysql -u root -proot xero_mirror -e "SELECT * FROM schema_migrations;"
 ```
 
+## Live Xero 測試
+
+`pkg/xero/live_test.go` 是 opt-in 的真實 API 整合測試，只做 GET 唯讀呼叫。未設定環境變數時相關測試一律 skip，預設 `go test ./...` 不會打真實 Xero、不消耗配額。
+
+### 取得 tenantId
+
+- 以有效 access token 呼叫 `GET https://api.xero.com/connections`，回應中的 `tenantId` 即為所需值。
+- 或查詢本機 DB 已授權的 `xero_tenants` 表。
+
+### 取得 access token
+
+- 透過本服務 `go run . auth` 授權後，從 DB 的加密 token 解密取得；或用 Xero 開發者工具手動取得。
+- access token 效期約 **30 分鐘**，過期後測試會失敗，需手動重新取得；測試不會自動 refresh。
+- 僅透過環境變數傳入，禁止寫進 `.env.example` 或 commit；`.env` 已被 gitignore 忽略。
+
+### 執行
+
+```bash
+TEST_XERO_TENANT_ID=... TEST_XERO_ACCESS_TOKEN=... \
+  go test ./pkg/xero -run TestLive -v
+```
+
+- 每次執行僅 3 次 GET（`/connections`、`/Invoices`、`/Contacts` 各一次），不寫入任何資料。
+- 不設 `TEST_XERO_*` 時，三個 `TestLive*` 案例全部 SKIP，`go test ./...` 維持全綠且零配額。
+
 ## 測試環境
 
-測試用獨立的 DB 與 port，避免污染 dev 資料：
+測試用獨立的 DB 與 port，避免污染 dev 資料（`docker-compose.test.yml`，拋棄式、無 volume）：
 
 ```bash
 # 啟動測試 MySQL（port 13315）
-docker run -d --name xero-mirror-test-mysql \
-  -e MYSQL_ROOT_PASSWORD=root \
-  -e MYSQL_DATABASE=xero_mirror_test \
-  -p 13315:3306 \
-  mysql:8.4
+docker compose -f docker-compose.test.yml up -d
 
-# 跑測試
+# 跑測試（需要 DB 的整合測試）
 TEST_MYSQL_DSN="root:root@tcp(127.0.0.1:13315)/xero_mirror_test?parseTime=true&loc=UTC" \
   go test ./... -count=1
 
-# 清除
-docker rm -f xero-mirror-test-mysql
+# 停止（測試庫可拋棄，不需保留資料）
+docker compose -f docker-compose.test.yml down
 ```
 
-任務 11 會建立 `docker-compose.test.yml` 統一管理。
+跨 package 的測試 helper 集中在 `tests/testing.go`：`RequireTestDatabase`（檢查 DSN 指向 `_test` 庫）、`LockTestDatabase`（取 `xero-mirror:test` advisory lock，避免各 package 的 DROP TABLE／migration 互踩）、`OpenTestDB`。未設定 `TEST_MYSQL_DSN` 或連不上 DB 時相關測試一律 skip，`go test ./...` 不會直接紅。
 
 ## 相關文件
 

@@ -21,7 +21,7 @@
 |------|------|--------|
 | cursor 增量 | 日常增量，靠 `sync_state.cursor_time` 續跑 | `sync` subcommand／cron |
 | 按月視窗回補 | 重跑或補歷史月份 | `sync --month YYYY-MM` |
-| cron 排程 | `serve` 常駐時定期觸發增量 | `main.go`（serve 啟動流程以 `SYNC_CRON` 註冊 `cron.AddFunc`，回呼 `pkg/handler` 提供的 job 函式） |
+| cron 排程 | `serve` 常駐時定期觸發增量 | `commands.go` 的 `runServe` 以 `SYNC_CRON` 註冊 `cron.AddFunc`；`runCronSync` 直接呼叫 `sync.Runner.RunAllIncremental`（`ListTenants` 只取 active），逐 tenant 對五個實體跑 `RunTenant` 增量 |
 | webhook 批次 | 只重同步事件影響到的資源 | `POST /webhook` |
 
 四者**共用同一套 fetch → upsert 核心**，不得各自實作抓取或寫入邏輯。
@@ -34,13 +34,20 @@
 ├── commands.go           # subcommand 接線（同 package main）：runSync / runServe / runAuth
 ├── pkg/
 │   ├── config/           # .env 載入、必填驗證、DSN 組裝
-│   ├── xero/             # OAuth2、tenant header、分頁、429 重試、DTO、XeroTime
+│   ├── xero/             # OAuth2、一次性授權流程、tenant header、分頁、429 重試、DTO、XeroTime
 │   ├── store/            # repository：手寫 SQL（唯一碰 SQL 的層）＋內嵌 migration
 │   │   └── migrations/   # 內嵌 DDL（NNN_name.up.sql / NNN_name.down.sql，經 //go:embed 打包）
 │   ├── sync/             # 同步編排：cursor、月度視窗、冪等 upsert
-│   └── handler/          # webhook、health、admin 觸發（cron 只在 main.go 註冊，本模組僅提供 job 函式）
-├── tests/                # TestLogger、DB fixture、mock client
-├── doc/{spec.md, modules/, plans/}
+│   └── handler/          # webhook、health、admin 觸發（cron 在 commands.go 註冊，同步邏輯一律轉 pkg/sync）
+├── scripts/              # Docker 初始化腳本（init-dev.sql）
+├── tests/                # 測試 helper：RequireTestDatabase／LockTestDatabase／OpenTestDB
+├── doc/
+│   ├── spec.md           # 架構與規格（必讀）
+│   ├── dev-setup.md      # 本機開發環境（dev／測試 MySQL、live 測試）
+│   ├── modules/          # 各模組設計（webhook-buffer.md、sync.md）
+│   └── plans/            # 實作計畫
+├── docker-compose.yml        # 本機 dev MySQL 8.4（host port 3307）
+├── docker-compose.test.yml   # 測試 MySQL（host port 13315，拋棄式、無 volume）
 ├── .env.example
 └── go.mod
 ```
@@ -61,9 +68,13 @@ Xero webhook ─► POST /webhook ─驗簽─┬ 簽章錯 → 401
                                     ├ body 不合法 → 400
                                     └ 正確 → 立即回 200（先回應、後處理）
                                           ▼
-                     webhook_events（eventId 去重）＋ sync_jobs（待辦入列）
+                     webhook_events（resourceId+eventDate 去重）＋ sync_jobs（待辦入列）
+                                          ├─► WebhookBuffer ─► RunBatch（僅 Invoices／Contacts；不推進 cursor）
+                                          └─► 其餘實體／失敗案例留 sync_jobs，交 cron 增量
+
+cron／sync 手動／--month ─► Runner.RunAllIncremental／RunAllMonth
                                           ▼
-cron／sync 手動／--month ─► sync.Run(ctx, tenantID, entity, Window)
+                          Runner.Run(ctx, tenantID, entity, Window)
                                           ├─► pkg/xero（分頁、限流、429 退避、token refresh）
                                           ▼
                      pkg/store（同一交易：實體 upsert ＋ sync_state 水位）
@@ -78,8 +89,13 @@ cron／sync 手動／--month ─► sync.Run(ctx, tenantID, entity, Window)
 func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error
 
 // 批量抓取多個 entry IDs（用於 webhook buffer flush）。
-// 只支援有 IDs 參數的端點（Invoices、Contacts）；不支援的端點退回逐個處理或全量。
+// 只支援有 IDs 參數的端點（Invoices、Contacts）；不支援的端點回錯誤，由 webhook buffer 交 cron 增量處理。
 func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error
+
+// 全部 active tenant 的入口：sync（無 --month）與 cron 都走 RunAllIncremental，
+// sync --month YYYY-MM 走 RunAllMonth；以 tenant 為失敗計數單位。
+func (r *Runner) RunAllIncremental(ctx context.Context) error
+func (r *Runner) RunAllMonth(ctx context.Context, start, end time.Time) error
 ```
 
 | `Window` 種類 | 欄位 | 推算 Xero 查詢條件 |
@@ -92,10 +108,13 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 
 **規則**
 
-1. 只有 `sync` subcommand 與 webhook／cron 轉發建立 `Window`；webhook **不得**自組 HTTP 請求或寫 SQL。
+1. 只有 `sync` subcommand、cron 與 handler（webhook／admin）轉發時建立 `Window`；webhook **不得**自組 HTTP 請求或寫 SQL。
 2. 單一 entity 失敗 → `slog.Warn` 降級，同輪其他 entity 繼續。
 3. cursor 更新必須與該批資料 upsert **同一交易**提交，否則失敗後漏資料。
 4. 冪等：同一批資料連跑兩次，DB 結果必須相同（`ON DUPLICATE KEY UPDATE`）。
+5. **進入點固定**：`sync`（無 `--month`）與 cron 都走 `Runner.RunAllIncremental`；`sync --month YYYY-MM` 走 `Runner.RunAllMonth`。cursor 增量用 `Window{Cursor}`，月度回補用 `Window{MonthStart, MonthEnd}`（UTC 半開）。
+6. **只有 `Cursor` 模式推進水位**：月度回補與 webhook batch 同步送 `Batch.Cursor = nil`，`upsertSyncStateSQL` 以 `IF(VALUES(cursor_time) IS NULL, cursor_time, ...)` 保留原 `cursor_time`，只更新 `last_run_at`／`status`；因此重跑歷史月份不會動到既有增量水位（既不前進也不回退），也不會清空。
+7. **失敗語意**：單一 entity 失敗只 `slog.Warn` 續跑；`RunAll*` 以 tenant 為失敗單位，部分 tenant 失敗只 Warn 並在最後回 `同步失敗 N 個 tenant`——`sync` subcommand 以 exit 1 結束，cron 只記 Warn 不中斷排程。
 
 ## 4. 資料表與同步實體（本版五個）
 
@@ -119,7 +138,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 - 每張實體表必含 `synced_at`（本地寫入時間）與 `xero_updated_at`（Xero `UpdatedDateUTC`）；上表為省版面未逐列列出。
 - 金額保留 Xero 回傳字串，加總／比較用十進位字串或整數最小單位，**禁 `float64`**。
 - 軟刪除只鏡射 `STATUS`（`DELETED` / `ARCHIVED`），**不得**因 API 沒回傳就 `DELETE` 本地列。
-- `sync_state.status` 列舉值固定為 `idle` / `running` / `failed` / `auth_required`；`auth_required` 由 `xero_tenants.auth_status` 推導（授權恢復後回到 `idle`），**不得**把 refresh 回傳的 `invalid_grant` 直接寫進 entity 級狀態。
+- `sync_state.status` 列舉值固定為 `idle` / `running` / `failed` / `auth_required`；`auth_required` 目前為**保留值**（未實作寫入），授權失效由 `xero_tenants.auth_status` 表達、`ListTenants` 只列 `active` 來跳過，**不得**把 refresh 回傳的 `invalid_grant` 直接寫進 entity 級狀態。
 - `xero_tenants.auth_status` 為 `active` / `auth_required`：refresh 失敗（`invalid_grant`）時只在此標記需重新授權。
 - **權責集中**（§4／§6 共用）：refresh 層**只**寫 `xero_tenants.auth_status`；`sync_state.status` 由同步編排讀 `auth_status` 後投影，任何層都不得直接把 `invalid_grant` 寫進 `sync_state`。
 - `sync_jobs` 去重：唯一鍵 `(tenant_id, entity, xero_id)`（**不含**可變的 `status`），`status` 為可變欄位，入列時用 `ON DUPLICATE KEY UPDATE` 只刷新待辦狀態；`status` 列舉值固定為 `pending` / `running` / `done` / `failed`，webhook 重送不得產生重複 job。
@@ -165,13 +184,13 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 
 **月度回補**：`/Invoices` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）；`/Contacts`、`/Accounts` 等不支援日期篩選的端點退化為全量 fetch + 冪等 upsert。
 
-**批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，可用於 webhook buffer 聚合後一次抓取多個 entry。`/CreditNotes` 與 `/Payments` 不支援批量 IDs，webhook 觸發時只能逐個抓取或走 cursor 增量。URL 長度限制約 40 個 IDs，超過需分批。
+**批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，可用於 webhook buffer 聚合後一次抓取多個 entry。`/CreditNotes` 與 `/Payments` 不支援批量 IDs，webhook 觸發時不逐個抓取，只記 log 並交 cron cursor 增量（事件已持久化於 `sync_jobs`，不會遺失）。URL 長度限制約 40 個 IDs，超過需分批。**本服務策略**：矩陣中「只能逐個或全量」「`where` 可用 OR」屬 Xero API 能力描述；webhook 路徑一律不採用逐個／OR 抓取。
 
 本服務自己的端點只允許 `GET`／`POST`，其他方法回 `405`；此限制不適用於呼叫 Xero API（詳見 §7.1）。
 
 ## 6. OAuth2 與 token 生命週期
 
-本專案是**服務**：Authorization Code + `offline_access`，**不要**照搬 `xero-cli` 的 PKCE 本機 CLI 流程。首次授權可用一次性 `auth` subcommand，但 token 必須落地 MySQL。
+本專案是**服務**：Authorization Code + `offline_access`，**不要**照搬 `xero-cli` 的 PKCE 本機 CLI 流程。首次授權可用一次性 `auth` subcommand，但 token 必須落地 MySQL。授權流程實作在 `pkg/xero/auth.go` 的 `Authorize`（state、授權 URL 輸出、臨時 callback server、token 交換、逐 tenant 加密寫庫），root `commands.go` 的 `runAuth` 只做設定 → migration → 呼叫；等待 callback 的 10 分鐘上限不涵蓋寫庫，寫庫使用獨立 timeout。
 
 | 項目 | 規格 |
 |------|------|
@@ -182,7 +201,9 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 併發 | 同 tenant refresh 序列化（process 內 `sync.Mutex` 單飛），避免兩個 token 都失效 |
 | 加密 | DB 只存 AES-256-GCM 密文（版本號 + 隨機 nonce + ciphertext）；金鑰 `XERO_TOKEN_ENC_KEY`，**禁**硬編碼／明文存 token／寫進 log |
 
-**單飛 refresh**：取鎖 → 重讀 DB token（避免吃到別人剛換好的值）→ access 未過期（留安全邊界）直接用 → 否則以 refresh 換新 token，同交易寫回 access + refresh + expiry → 解鎖。`invalid_grant` 視為需重新授權：`slog.Error` 並在 `xero_tenants` 標記 `auth_status = auth_required`（**不寫入** entity 級 `sync_state.status`），不無限重試；該 tenant 的同步以 `sync_state.status = auth_required` 降級跳過，直到重新授權。權責與 §4 一致：refresh 只寫 `xero_tenants.auth_status`，`sync_state.status` 由同步編排投影，任何層不得直接寫 `invalid_grant`。
+**單飛 refresh**：取鎖 → 重讀 DB token（避免吃到別人剛換好的值）→ access 未過期（留安全邊界）直接用 → 否則以 refresh 換新 token，同交易寫回 access + refresh + expiry → 解鎖。`invalid_grant` 視為需重新授權：`slog.Error` 並在 `xero_tenants` 標記 `auth_status = auth_required`（**不寫入** entity 級 `sync_state.status`），不無限重試；該 tenant 會因 `xero_tenants.auth_status = auth_required` 被 `ListTenants`（只列 `active`）排除於 cron 與手動同步之外，直到重新授權；`sync_state` 不會實際寫入 `auth_required`。權責與 §4 一致：refresh 只寫 `xero_tenants.auth_status`，任何層不得直接寫 `invalid_grant`。
+
+**單一 tenant 假設**：本服務目前只接一個 Xero organisation。`auth` 寫入多筆 connection 時，各 tenant 會存入同一組 refresh token，但 refresh 輪換只回寫當前 tenant；多 tenant 情境下其餘 tenant 的 refresh token 會失效。若未來要支援多 tenant，需改為 user 級單飛並同步更新所有 tenant（計畫任務 15）。
 
 ## 7. Webhook 規則（強制）
 
@@ -198,9 +219,11 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 
 1. 讀 **raw body**（`io.ReadAll`）；驗簽前**不得** `json.Unmarshal` 覆蓋或丟棄 raw bytes。
 2. `HMAC-SHA256(XERO_WEBHOOK_KEY, rawBody)` → base64，與 `x-xero-signature` 以 **constant-time** 比較（`hmac.Equal`）。
-3. 通過後才 `json.Unmarshal`；以 `eventId` 去重（缺值用 `resourceId` + `eventDate`），重複事件**不得**重複入列。
+3. 通過後才 `json.Unmarshal`；Xero event 無 `eventId`，去重鍵固定為 `resourceId` + `eventDate`（毫秒，格式 `resourceId_eventDateUnixMilli`），重複事件**不得**重複入列；跨 tenant 不加 tenant 維度（`resourceId` 為 Xero GUID，全域唯一）。`event_id` 長度：GUID 36 + `_` + 13 位毫秒 = 50，安全落在 `varchar(64)`；若日後 `xero_id` 改用非 GUID 格式，須先放寬欄位（新開 migration，不改舊檔）。
 4. 立即回 200，再把事件寫入 `webhook_events` 與 `sync_jobs`；處理太慢會被 Xero 停用 webhook。
 5. webhook 只決定「重同步什麼」（entity + xero_id），抓取與寫入一律呼叫 `sync.Run` 或 `sync.RunBatch`。
+6. 任一 `eventDateUtc` 解析失敗 → **整批**回 `400`，不部分入列。
+7. 入列失敗（`webhook_events`／`sync_jobs` 寫入錯誤）→ 回 `500`，刻意讓 Xero 重送以避免遺失；此為第 4 點「先回 200」的明文例外。
 
 ### 7.0 Webhook Buffer 與 Batch Get（節省 API 配額）
 
@@ -225,41 +248,48 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 
 **Buffer 設計**
 
+單一背景 goroutine（event loop）串行處理，所有 `pending` 狀態只在該 goroutine 記憶體取，不需額外 mutex 保護；HTTP handler 端只透過帶緩衝的 `events` channel 非阻塞派送。
+
 ```go
 // pkg/handler/buffer.go
 type WebhookBuffer struct {
-    mu          sync.Mutex
-    pending     map[Entity]map[string]struct{}  // entity → set of xero_ids
-    flushTimer  *time.Timer
-    batchSize   int           // 預設 30（留 buffer 給 URL 長度）
-    flushDelay  time.Duration // 預設 3 秒
+    runner     *pkgsync.Runner
+    batchSize  int
+    flushDelay time.Duration
+
+    baseCtx context.Context // 建構期設定後唯讀，loop 所有 flush 皆用它
+
+    events    chan bufferItem // 容量 1024，滿了記警告後丟棄，不阻塞 HTTP handler
+    done      chan struct{}
+    closeOnce sync.Once
+    mu        sync.Mutex
+    closed    bool
+
+    // (tenant, entity) → xero_id 集合（自動去重），僅 event loop 存取
+    pending map[string]map[pkgsync.Entity]map[string]struct{}
+    timer   *time.Timer
 }
 ```
 
-**觸發 flush 條件**（任一滿足即 flush）
+**觸發 flush 條件**（任一滿足即 flush，flush 一律用唯讀的 `baseCtx`）
 
 1. **Timer 到期**：收到第一個 event 後啟動 timer（預設 3 秒），到期 flush
-2. **Batch size**：單個 entity 累積達到 `batchSize`（預設 30），立即 flush
-3. **Shutdown**：收到 SIGINT/SIGTERM，flush 剩餘 buffer
+2. **Batch size**：單一 `(tenant, entity)` 群組累積達到 `batchSize`（預設 30），立即 flush 全部 pending
+3. **Shutdown**：關閉 `events` channel，event loop 把剩餘 pending 做最後 flush 後結束；`Shutdown(ctx)` 的 ctx 只控制等待上限（逾時回 `ctx.Err()`）
 
 **各端點策略**
 
 | 端點 | 策略 | 說明 |
 |------|------|------|
-| `/Invoices` | ✅ Buffer + Batch Get | 支援 `IDs` 參數 |
-| `/Contacts` | ✅ Buffer + Batch Get | 支援 `IDs` 參數 |
-| `/CreditNotes` | ⚠️ 逐個抓取 | 不支援 `IDs`，只能 `GET /CreditNotes/{id}` |
-| `/Payments` | ⚠️ 逐個抓取或 OR 條件 | 可用 `where=PaymentID=guid("...") OR ...`，但有長度限制 |
-| `/Accounts` | ❌ 全量 + 冪等 upsert | 不分頁、不支援 IDs |
+| `/Invoices` | ✅ Buffer + RunBatch | 支援 `IDs`，`GET /Invoices?IDs=uuid1,uuid2,...` |
+| `/Contacts` | ✅ Buffer + RunBatch | 支援 `IDs`，`GET /Contacts?IDs=uuid1,uuid2,...` |
+| `/CreditNotes` | ❌ 只記 log，交 cron 增量 | 不支援 `IDs`，buffer 不呼叫 API，事件已在 `sync_jobs` |
+| `/Payments` | ❌ 只記 log，交 cron 增量 | 同上，不做逐個抓取或 `where=...OR...` |
+| `/Accounts` | ❌ 全量 + 冪等 upsert | 不分頁、不支援 IDs，全量重跑由 cron 負責 |
 
 **不支援批量 IDs 的端點**
 
-對於 `/CreditNotes` 和 `/Payments`，有兩種選擇：
-
-1. **逐個抓取**：每個 entry ID 呼叫 `GET /CreditNotes/{id}`
-2. **走 cursor 增量**：不處理 webhook，改由 cron 定期增量 sync
-
-建議：對於這類端點，webhook 只記錄到 `sync_jobs`，由 worker 逐個處理或改走 cursor 增量。
+`/CreditNotes` 與 `/Payments` 不支援 `IDs` 參數，實作採**單一策略：只記 `slog.Info`、不發任何 Xero 請求，交 cron cursor 增量收斂**。webhook 事件在 handler 端已持久化到 `webhook_events` 與 `sync_jobs`，不會因 buffer 不處理而遺失；亦**不做**逐個 `GET /CreditNotes/{id}` 或 `where=...OR...` fallback，避免在 flush 路徑對高頻事件逐個打 API、耗費配額。
 
 **配置參數**
 
@@ -273,12 +303,19 @@ type WebhookBuffer struct {
 | 方法 | 路徑 | 用途 | 契約 |
 |------|------|------|------|
 | `POST` | `/webhook` | Xero 回呼 | HMAC-SHA256 驗簽；成功 `200`、簽章錯 `401`、body 不合法 `400` |
-| `GET` | `/health` | 健康檢查 | DB ping 正常 `200`，異常 `503` |
+| `GET` | `/health` | 健康檢查 | DB ping 正常 `200`（body `{"status":"ok"}`），異常 `503`（`{"status":"unhealthy"}`） |
 | `POST` | `/admin/sync` | 手動觸發同步 | 參數 `entity` / `tenant` / `month`（query 或 form）；僅允許 `POST` |
 
-- 本服務端點**只允許** `GET`／`POST`；其他方法（`PUT`／`PATCH`／`DELETE`）一律回 `405 Method Not Allowed`。
+- 本服務端點**只允許** `GET`／`POST`；其他方法（`PUT`／`PATCH`／`DELETE`）一律回 `405 Method Not Allowed`，並帶 `Allow` header 標示允許的方法；未知路徑回 `404`。
+- `/health` 只做 `store.Ping`：成功回 JSON `{"status":"ok"}`，失敗先 `slog.Warn` 再回 `{"status":"unhealthy"}`。
+- `/admin/sync` 參數規則：
+  - `tenant`、`entity` 必填，缺一或 `entity` 未知 → `400`（JSON `{"error":"..."}`），驗證失敗前不得呼叫 `runner`。
+  - `entity` 大小寫不敏感，接受 sync `Entity` 值與別名：`contacts`→`CONTACTS`、`accounts`→`ACCOUNTS`、`invoices`/`invoice`→`INVOICES`、`creditnotes`/`credit_notes`→`CREDIT_NOTES`、`payments`/`payment`→`PAYMENTS`。
+  - `month` 選填，格式必須是 `YYYY-MM`，否則 `400`；有值時組該月 00:00 UTC 起、下月 00:00 止的半開月度視窗；省略時讀 `sync_state.cursor_time`，無紀錄（`sql.ErrNoRows`）視為首跑全量（cursor 為 `nil`）。
+  - `runner.Run` 失敗回 `500`（`{"error":"同步失敗"}`）並 `slog.Error`；成功回 `{"status":"ok"}`。
 - 此限制只針對本服務提供的端點；呼叫 Xero API 照 Xero 要求（例如註冊 webhook 是 `PUT /webhooks`）。
 - 路由只做參數解析／驗證／回狀態碼，業務邏輯一律轉 `pkg/sync`。
+- **部署邊界**：`/admin/sync` 無內建認證，只可部署於私有網路或反向代理後方（限制來源 IP 或加鑑層），不得直接暴露公網。
 
 ## 8. 環境變數
 
@@ -304,23 +341,38 @@ type WebhookBuffer struct {
 
 ```bash
 go build -o xero-mirror.exe .            # 唯一 binary
-go run . sync --month 2026-05            # 回補/重跑單月
-go run . sync                            # 依 cursor 增量
+go run . sync --month 2026-05            # 回補/重跑單月（不推進 cursor）
+go run . sync                            # 依 cursor 增量（全部 active tenant）
 go run . serve                           # cron + webhook 常駐
 go run . auth                            # 一次性授權（token 落地 MySQL）
 go fmt ./... && go vet ./...             # 提交前必跑
-go test ./...                            # 全套
-go test ./pkg/sync -run TestCursor -v    # 單一模組 / 單一測試
+go test ./...                            # 全套（無 DB／憑證時整合測試 SKIP）
+go test ./pkg/sync -run TestRunBatch -v  # 單一模組 / 單一測試
+
+# 需要 DB 的整合測試：測試 MySQL（host port 13315，拋棄式）
+docker compose -f docker-compose.test.yml up -d
+TEST_MYSQL_DSN="root:root@tcp(127.0.0.1:13315)/xero_mirror_test?parseTime=true&loc=UTC" \
+  go test ./... -count=1
+docker compose -f docker-compose.test.yml down
 ```
 
 Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`serve`／`auth` 任一 subcommand 啟動、連上 MySQL 後**自動套用**，不需要再手動以 mysql 客戶端載入 SQL 檔。
 
 變更順序固定，不得跳步：**改 `pkg/store/migrations/*.sql` → `go build` → 跑任一 subcommand 觸發 migrate → `go test`**。
 
+- **`sync` 語意**：無 `--month` 與 cron 同走 `Runner.RunAllIncremental`；`--month YYYY-MM` 走 `Runner.RunAllMonth`。月度回補**不推進** `sync_state.cursor_time`（`Batch.Cursor = nil`，見 §3 規則 6）。部分 tenant 失敗只 `slog.Warn` 並續跑，最後回 `同步失敗 N 個 tenant`，subcommand 以 exit 1 結束；cron 對同一個錯誤只 Warn，不中斷排程。
 - 回滾：人工執行對應 `.down.sql`，並刪掉 `schema_migrations` 裡該版本那一列（程式不自動跑 down）。
-- 建置與單元測試可在 host 直接跑；需要 DB 的整合測試走 `docker compose -f docker-compose.test.yml up -d mysql`。
+- 建置與單元測試可在 host 直接跑；需要 DB 的整合測試走 `docker compose -f docker-compose.test.yml up -d`（測試 MySQL 不保留資料），DSN 以 `TEST_MYSQL_DSN` 傳入。
 - migration 與 `pkg/store` 對應的 SQL 修改要同一 commit；commit 前看 `git status`，用 Conventional Commits。
-- **graceful shutdown（`serve`）**：收到 `SIGINT`／`SIGTERM` → 先停 cron（`cron.Stop()`，不再排新 job）→ `http.Server.Shutdown(ctx)` → 等待當前 sync 收尾（`context` 取消後正常回傳）→ exit。
+- **graceful shutdown（`serve`）**：收到 `SIGINT`／`SIGTERM`（`main.go` 以 `signal.NotifyContext` 取消 root ctx）後，`commands.go` 的 `serveDeps.shutdown` 依固定順序關閉，單步失敗只 `slog.Warn` 續行、不中斷後續步驟。關機流程自建 `context.WithTimeout(context.Background(), 30s)`（常數 `shutdownTimeout`，**總上限**、各步共用同一預算），不依賴已被信號取消的 root ctx，因此等待必定有上限：
+  1. **context 生命週期**：`runServe` 建立兩條獨立於 signal ctx、派生自 `context.Background()` 的 context —— `cronCtx`（cron 同步用）與 `bufCtx`（`WebhookBuffer` 的 `baseCtx`，flush 用）。signal ctx 取消只觸發關機流程，不會連帶讓在飛同步或最後 flush 立刻失效；兩者皆 `defer cancel` 防洩漏，並由 shutdown 路徑掌控實際取消時機。
+  2. `cron.Stop()`：停止排新 job。robfig/cron v3 的 `Stop()` 回傳一個 `context.Context`，會在所有執行中 job 結束時 done；服務在 30 秒總預算內 `select` 等待，**逾時才呼叫 `cancelCron()`** 取消 cronCtx，讓仍在飛的 cron／HTTP／DB 呼叫收斂後繼續關機（job 及時結束則不取消）。
+  3. `http.Server.Shutdown(shutdownCtx)`：停止接收新連線並讓進行中請求收尾，等待受 30 秒總預算約束。
+  4. `WebhookBuffer.Shutdown(shutdownCtx)`：event loop 把剩餘 pending 做最後 flush 後結束；**此時 `bufCtx` 尚未取消**，最後 flush 仍有效，此步不得被前一步的錯誤跳過。flush 完成（或等待逾時）後才呼叫 `cancelBuf()`。
+  5. `*sql.DB.Close()`：關閉連線池。
+- **cron 重疊防護（M1）**：cron 以 `cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))` 建立；上一輪 `runCronSync` 還在執行時，到點的下一輪直接跳過（記 logger 訊息），避免長同步與下一輪重疊、互相踩到 `sync_state` 水位。
+- **cron 同步語意（`runCronSync`）**：cron 回呼只負責 `slog.Info("cron 同步開始")` 後呼叫 `sync.Runner.RunAllIncremental`，不再自行列 tenant 或另寫同步流程；失敗只 `slog.Warn("cron 同步未全部成功", "err", err)`，不讓排程中斷。`RunAllIncremental` 先用 `store.ListTenants` 取 `auth_status = 'active'` 的 tenant（`auth_required` 需重新授權才會再入列），再逐 tenant 呼叫 `sync.RunTenant`；`RunTenant` 依 `Entities()` 固定順序（Invoices、CreditNotes、Payments、Contacts、Accounts）對各實體跑 `RunIncremental`（讀 `sync_state.cursor_time`，無紀錄視為首跑全量）。單一實體失敗只 `slog.Warn` 並續跑，全部實體都失敗 `RunTenant` 才回錯；單一 tenant 失敗同樣 Warn 後續跑下一個 tenant。失敗計數一律以 tenant 為單位（`RunAllMonth` 任一實體失敗即記該 tenant 失敗，錯誤訊息為 `同步失敗 N 個 tenant`）。
+- `serve` 的 HTTP server 必須設 `ReadHeaderTimeout`（常數 `readHeaderTimeout`，10 秒），避免無 timeout 的常駐 server；`AddFunc` 回傳 error 視為啟動失敗，不得靜默略過。
 
 ## 10. 錯誤處理、日誌與測試
 
@@ -338,4 +390,12 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
 **必測三項**：冪等（同批資料跑兩次結果相同）、續跑（中途失敗後 cursor 可從上次水位續跑）、webhook 簽章錯誤回 `401`。
 
 - Xero 一律 `httptest.Server` mock 並斷言 header（`Authorization`、`Xero-tenant-id`）；`go test ./...` 不得需要真實憑證，需要者 `t.Skip()`；無 DB 時整合測試 `t.Skip()`。
+- DB 整合測試用拋棄式測試 MySQL（`docker-compose.test.yml`，host port 13315），DSN 以 `TEST_MYSQL_DSN` 傳入，未設定或連不上即 `t.Skip()`：
+
+  ```bash
+  docker compose -f docker-compose.test.yml up -d
+  TEST_MYSQL_DSN="root:root@tcp(127.0.0.1:13315)/xero_mirror_test?parseTime=true&loc=UTC" \
+    go test ./... -count=1
+  docker compose -f docker-compose.test.yml down
+  ```
 - 每次變更最多 3–5 個案例，既有測試檔只追加；改模組前讀 `doc/modules/<module>.md`，行為／資料表／環境變數變更時同批更新本文件與模組文件，並同步 `doc/plans/2026-11-16-bootstrap.md` 狀態（阻塞標 🔴 並寫原因）。
