@@ -47,19 +47,20 @@ func NewRunner(c *xero.Client, s *store.Store) *Runner {
 
 // entitySpec 描述端點能力；未核對支援度的能力一律關閉，走全量 + 冪等 upsert。
 type entitySpec struct {
-	path          string
-	paginated     bool
-	supportsSince bool
-	monthFilter   bool
+	path             string
+	paginated        bool
+	supportsSince    bool
+	monthFilter      bool
+	supportsBatchIDs bool // 支援 ?IDs=uuid1,uuid2,... 批量查詢
 }
 
 // entitySpecs 是五個實體的端點能力表（對照 doc/spec.md §5）。
 var entitySpecs = map[Entity]entitySpec{
-	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: false, monthFilter: false},
-	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false},
-	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true},
-	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: false, monthFilter: false},
-	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: false, monthFilter: false},
+	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: true},
+	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
+	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true},
+	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
+	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
 }
 
 // Run 依 Window 抓取單一 entity：所有頁抓完、映射完成後只寫一次 DB。
