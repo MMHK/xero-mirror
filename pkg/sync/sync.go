@@ -59,7 +59,7 @@ type entitySpec struct {
 
 // entitySpecs 是五個實體的端點能力表（對照 doc/spec.md §5）。
 var entitySpecs = map[Entity]entitySpec{
-	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: true},
+	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: true},
 	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
 	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true},
 	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false},

@@ -180,7 +180,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | `GET /Invoices` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 主力實體 |
 | `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where`（`Date>` 支援，`>=` 不支援） | ❌ 不支援 | 無批量參數，只能逐個或全量；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
 | `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`；`where` 可用 OR 條件 | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
-| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 官方文件列支援（2026-11-17），本批未啟用，維持全量 fetch | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
+| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 官方文件列支援（2026-11-17），程式已啟用 `If-Modified-Since` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
 | `GET /Accounts` | 不分頁（單次回傳全部） | 全量 | ❌ 不支援 | Month 視窗 → 全量 |
 
 **預設規則**：矩陣中標「未啟用」或尚未核對的能力，一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。

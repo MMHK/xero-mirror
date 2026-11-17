@@ -118,7 +118,7 @@ SELECT ... FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id
 
 分頁、增量、月度篩選、批量 IDs 的正式能力矩陣見 `doc/spec.md` §5，本文件不重抄。程式端唯一來源是 `pkg/sync/sync.go` 的 `entitySpecs`：
 
-- `supportsSince`：目前對 Invoices、CreditNotes、Payments 開啟；其餘實體即使帶 `Cursor`，`buildRequest` 也不會加 `If-Modified-Since`，退化為全量 fetch + 冪等 upsert。
+- `supportsSince`：目前對 Invoices、CreditNotes、Payments、Contacts 開啟；其餘實體即使帶 `Cursor`，`buildRequest` 也不會加 `If-Modified-Since`，退化為全量 fetch + 冪等 upsert。
 - `monthFilter`：目前只對 Invoices 開啟，組 `Date>=DateTime(...)&&Date<DateTime(...)`；其餘實體月度視窗退化為全量。
 - `supportsBatchIDs`：只對 Invoices、Contacts 開啟，並以 `SupportsBatchIDs` 對外匯出。
 - `paginated`：只對 Accounts 關閉（單次回傳全部）。

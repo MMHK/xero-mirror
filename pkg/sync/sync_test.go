@@ -433,11 +433,11 @@ func TestRunEntityMonthOnlyRequestsEntity(t *testing.T) {
 	require.Nil(t, state.CursorTime, "月度模式不得推進 cursor")
 }
 
-// TestRunSendsIfModifiedSinceByEntity 驗證 CreditNotes／Payments 帶 Cursor 時送出
+// TestRunSendsIfModifiedSinceByEntity 驗證 CreditNotes／Payments／Contacts 帶 Cursor 時送出
 // If-Modified-Since，格式為 http.TimeFormat（表驅動）。
 func TestRunSendsIfModifiedSinceByEntity(t *testing.T) {
 	cursor := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
-	for _, entity := range []Entity{EntityCreditNotes, EntityPayments} {
+	for _, entity := range []Entity{EntityCreditNotes, EntityPayments, EntityContacts} {
 		got := make(chan string, 1)
 		r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
 			got <- req.Header.Get("If-Modified-Since")
@@ -450,7 +450,7 @@ func TestRunSendsIfModifiedSinceByEntity(t *testing.T) {
 
 // TestRunOmitsIfModifiedSinceWithoutCursor 驗證首跑（Cursor 為 nil）不送 If-Modified-Since。
 func TestRunOmitsIfModifiedSinceWithoutCursor(t *testing.T) {
-	for _, entity := range []Entity{EntityCreditNotes, EntityPayments} {
+	for _, entity := range []Entity{EntityCreditNotes, EntityPayments, EntityContacts} {
 		got := make(chan bool, 1)
 		r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
 			got <- req.Header.Get("If-Modified-Since") != ""
