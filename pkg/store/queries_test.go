@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,4 +87,18 @@ func TestWithTxRollback(t *testing.T) {
 	require.NoError(t, s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM xero_contacts WHERE tenant_id = ?", "t1").Scan(&n))
 	require.Zero(t, n)
+}
+
+// TestUpsertInvoiceLongNumber 驗證 255 字元的 Xero 發票號可完整寫入並讀回。
+func TestUpsertInvoiceLongNumber(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	number := strings.Repeat("N", 255)
+	inv := Invoice{TenantID: "t1", InvoiceID: "inv-long", Number: &number, SyncedAt: time.Now().UTC()}
+	require.NoError(t, s.WithTx(ctx, func(tx *sql.Tx) error { return s.UpsertInvoice(ctx, tx, inv) }))
+
+	var got string
+	require.NoError(t, s.db.QueryRowContext(ctx,
+		"SELECT number FROM xero_invoices WHERE tenant_id = ? AND invoice_id = ?", "t1", "inv-long").Scan(&got))
+	require.Equal(t, number, got)
 }
