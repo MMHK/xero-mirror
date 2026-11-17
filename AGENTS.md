@@ -33,6 +33,9 @@ repo 目前只有 `LICENSE`、`.gitignore` 與本文件，**尚未有 `go.mod` �
 3. **同步邏輯只有一份**
    - cursor sync、月度視窗 sync、webhook 批次同步共用同一套 fetch → upsert 核心。
    - webhook handler 只決定「要重同步什麼」，**不得另寫一套抓取/寫入邏輯**。
+4. **工具鏈約束**
+   - **禁止 pwsh**：所有 shell 指令用 Node.js 處理字符問題（避免 pwsh 的編碼與轉義陷阱）。
+   - **禁止 npm**：統一使用 **yarn v4**（Berry）作為 package manager；`package.json` 必須搭配 `yarn.lock`。
 
 ---
 
@@ -239,7 +242,8 @@ go test ./pkg/sync -run TestCursor -v  # 單一模組 / 單一測試
 ### 12.2 每個任務的順序
 
 ```
-1. PLAN       → 在 doc/plans/<task>-plan.md 寫計畫（繁體中文）
+1. PLAN       → 在 doc/plans/YYYY-MM-DD-<slug>.md 寫計畫（繁體中文）
+                 slug 用 kebab-case（小寫 + 連字號），例如 2026-11-17-webhook-handler.md
 2. USER REVIEW → 用 question 工具呈現計畫並等待明確批准
 3. DELEGATE   → 派 sub agent 實作（一次一個邏輯任務）
 4. REVIEW     → 派 code-reviewer 對照計畫審查

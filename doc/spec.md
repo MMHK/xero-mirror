@@ -75,13 +75,18 @@ cron／sync 手動／--month ─► sync.Run(ctx, tenantID, entity, Window)
 
 ```go
 // 唯一 fetch → upsert 核心；Window 只決定時間範圍，流程完全相同。
-func Run(ctx context.Context, tenantID string, entity Entity, w Window) error
+func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error
+
+// 批量抓取多個 entry IDs（用於 webhook buffer flush）。
+// 只支援有 IDs 參數的端點（Invoices、Contacts）；不支援的端點退回逐個處理或全量。
+func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error
 ```
 
 | `Window` 種類 | 欄位 | 推算 Xero 查詢條件 |
 |---------------|------|--------------------|
 | Cursor | `Cursor *time.Time`（讀自 `sync_state.cursor_time`；`nil` 代表首跑全量） | 端點支援時用 `If-Modified-Since`（`http.TimeFormat`，GMT）；不支援則全量 |
 | Month | `MonthStart` / `MonthEnd *time.Time`（該月 00:00 起、下月 00:00 止，UTC，半開區間；必須成對，且與 `Cursor` 互斥） | 端點支援日期篩選時以區間回補（`/Invoices` 用 `where=Date>=DateTime(y,m,d)&&Date<DateTime(...)`），配合冪等 upsert |
+| Batch IDs | `ids []string`（由 webhook buffer 收集的去重 entry IDs） | `?IDs=uuid1,uuid2,...`（URL 長度限制約 40 個，超過需分批） |
 
 **Window 退化規則**：月度視窗不是通用規則。`/Accounts`、`/Contacts` **不支援**日期區間過濾，對這兩者 Month 視窗退化為**全量 fetch + 冪等 upsert**，語意等同一次全量重跑（結果必須與全量 sync 相同）；日期欄位要用 `Date` 還是 `UpdatedDateUTC`，一律依端點能力決定，不得假設兩者皆可用。
 
@@ -146,19 +151,21 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 時間 | `UpdatedDateUTC` 可能為 `/Date(1234567890000+0000)/`，顯式解析毫秒 + 時區偏移，**禁** RFC3339 |
 | JSON tag | Xero DTO 照原樣 PascalCase（`json:"InvoiceID"`），不統一成 `snake_case`；DTO 與 DB 模型分開定義 |
 
-**端點能力矩陣**（實作前請對照當期 Xero 文件核對，差異以文件為準）
+**端點能力矩陣**（2026-11 核對）
 
-| 端點 | 分頁 | 增量／篩選方式 | 備註 |
-|------|------|----------------|------|
-| `GET /Invoices` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | 主力實體 |
-| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where` 支援度**實作前核對** | 不支援則全量 + 冪等 upsert |
-| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where` 支援度**實作前核對** | 不支援則全量 + 冪等 upsert |
-| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 待核對 | Month 視窗 → 全量 |
-| `GET /Accounts` | 不分頁（單次回傳全部） | 全量 | Month 視窗 → 全量 |
+| 端點 | 分頁 | 增量／篩選方式 | 批量 IDs | 備註 |
+|------|------|----------------|----------|------|
+| `GET /Invoices` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 主力實體 |
+| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where`（`Date>` 支援，`>=` 不支援） | ❌ 不支援 | 無批量參數，只能逐個或全量 |
+| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`；`where` 可用 OR 條件 | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制 |
+| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 待核對 | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
+| `GET /Accounts` | 不分頁（單次回傳全部） | 全量 | ❌ 不支援 | Month 視窗 → 全量 |
 
-**預設規則**：矩陣中標「實作前核對」者，未完成核對前一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣（TODO 標記保留到核對完成）。
+**預設規則**：矩陣中標「待核對」者，未完成核對前一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。
 
 **月度回補**：`/Invoices` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）；`/Contacts`、`/Accounts` 等不支援日期篩選的端點退化為全量 fetch + 冪等 upsert。
+
+**批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，可用於 webhook buffer 聚合後一次抓取多個 entry。`/CreditNotes` 與 `/Payments` 不支援批量 IDs，webhook 觸發時只能逐個抓取或走 cursor 增量。URL 長度限制約 40 個 IDs，超過需分批。
 
 本服務自己的端點只允許 `GET`／`POST`，其他方法回 `405`；此限制不適用於呼叫 Xero API（詳見 §7.1）。
 
@@ -193,7 +200,73 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 2. `HMAC-SHA256(XERO_WEBHOOK_KEY, rawBody)` → base64，與 `x-xero-signature` 以 **constant-time** 比較（`hmac.Equal`）。
 3. 通過後才 `json.Unmarshal`；以 `eventId` 去重（缺值用 `resourceId` + `eventDate`），重複事件**不得**重複入列。
 4. 立即回 200，再把事件寫入 `webhook_events` 與 `sync_jobs`；處理太慢會被 Xero 停用 webhook。
-5. webhook 只決定「重同步什麼」（entity + xero_id），抓取與寫入一律呼叫 `sync.Run`。
+5. webhook 只決定「重同步什麼」（entity + xero_id），抓取與寫入一律呼叫 `sync.Run` 或 `sync.RunBatch`。
+
+### 7.0 Webhook Buffer 與 Batch Get（節省 API 配額）
+
+**問題**：同一個 entry（如 Invoice A）短時間內可能觸發多個 webhook event（建立、更新、付款）。如果每個 event 都立即呼叫 API，會浪費配額。
+
+**解法**：收集多個 entry IDs，去重後批量抓取。
+
+```
+收到 event (inv-A) ─┐
+收到 event (inv-B) ─┤
+收到 event (inv-A) ─┼─► Buffer 收集 {inv-A, inv-B}（去重）
+收到 event (inv-C) ─┘    │
+                         ▼
+                  達到 batch size 或 timer 到期
+                         │
+                         ▼
+                  GET /Invoices?IDs=inv-A,inv-B（1 次 API）
+                         │
+                         ▼
+                  upsert 全部資料
+```
+
+**Buffer 設計**
+
+```go
+// pkg/handler/buffer.go
+type WebhookBuffer struct {
+    mu          sync.Mutex
+    pending     map[Entity]map[string]struct{}  // entity → set of xero_ids
+    flushTimer  *time.Timer
+    batchSize   int           // 預設 30（留 buffer 給 URL 長度）
+    flushDelay  time.Duration // 預設 3 秒
+}
+```
+
+**觸發 flush 條件**（任一滿足即 flush）
+
+1. **Timer 到期**：收到第一個 event 後啟動 timer（預設 3 秒），到期 flush
+2. **Batch size**：單個 entity 累積達到 `batchSize`（預設 30），立即 flush
+3. **Shutdown**：收到 SIGINT/SIGTERM，flush 剩餘 buffer
+
+**各端點策略**
+
+| 端點 | 策略 | 說明 |
+|------|------|------|
+| `/Invoices` | ✅ Buffer + Batch Get | 支援 `IDs` 參數 |
+| `/Contacts` | ✅ Buffer + Batch Get | 支援 `IDs` 參數 |
+| `/CreditNotes` | ⚠️ 逐個抓取 | 不支援 `IDs`，只能 `GET /CreditNotes/{id}` |
+| `/Payments` | ⚠️ 逐個抓取或 OR 條件 | 可用 `where=PaymentID=guid("...") OR ...`，但有長度限制 |
+| `/Accounts` | ❌ 全量 + 冪等 upsert | 不分頁、不支援 IDs |
+
+**不支援批量 IDs 的端點**
+
+對於 `/CreditNotes` 和 `/Payments`，有兩種選擇：
+
+1. **逐個抓取**：每個 entry ID 呼叫 `GET /CreditNotes/{id}`
+2. **走 cursor 增量**：不處理 webhook，改由 cron 定期增量 sync
+
+建議：對於這類端點，webhook 只記錄到 `sync_jobs`，由 worker 逐個處理或改走 cursor 增量。
+
+**配置參數**
+
+| 環境變數 | 說明 | 預設 |
+|---------|------|------|
+| `WEBHOOK_BUFFER_SIZE` | 單個 entity 的 batch size | 30 |
+| `WEBHOOK_BUFFER_DELAY` | flush delay（毫秒） | 3000 |
 
 ### 7.1 HTTP 路由表面
 
@@ -222,6 +295,8 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | `SYNC_CRON` | cron 表示式，例：`0 */2 * * *` |
 | `HTTP_ADDR` | `serve` 監聽位址，例：`:8080` |
 | `XERO_DAILY_CALL_LIMIT` | 選用；每 tenant 每日呼叫上限，未設定時採 `pkg/config` 內建預設（**禁**硬編碼在限流器） |
+| `WEBHOOK_BUFFER_SIZE` | 選用；webhook buffer 的 batch size，未設定時預設 30 |
+| `WEBHOOK_BUFFER_DELAY` | 選用；webhook buffer flush delay（毫秒），未設定時預設 3000 |
 
 新增變數固定三步：`pkg/config` 讀取並驗證 → 補 `.env.example` → 更新本文件。
 
@@ -263,4 +338,4 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
 **必測三項**：冪等（同批資料跑兩次結果相同）、續跑（中途失敗後 cursor 可從上次水位續跑）、webhook 簽章錯誤回 `401`。
 
 - Xero 一律 `httptest.Server` mock 並斷言 header（`Authorization`、`Xero-tenant-id`）；`go test ./...` 不得需要真實憑證，需要者 `t.Skip()`；無 DB 時整合測試 `t.Skip()`。
-- 每次變更最多 3–5 個案例，既有測試檔只追加；改模組前讀 `doc/modules/<module>.md`，行為／資料表／環境變數變更時同批更新本文件與模組文件，並同步 `doc/plans/bootstrap-plan.md` 狀態（阻塞標 🔴 並寫原因）。
+- 每次變更最多 3–5 個案例，既有測試檔只追加；改模組前讀 `doc/modules/<module>.md`，行為／資料表／環境變數變更時同批更新本文件與模組文件，並同步 `doc/plans/2026-11-16-bootstrap.md` 狀態（阻塞標 🔴 並寫原因）。
