@@ -78,10 +78,12 @@ cron／sync 手動／--month ─► Runner.RunAllIncremental／RunAllMonth
                           Runner.Run(ctx, tenantID, entity, Window)
                                           ├─► pkg/xero（分頁、限流、429 退避、token refresh）
                                           ▼
-                     pkg/store（同一交易：實體 upsert ＋ sync_state 水位）
+                     pkg/store（每 chunk 一個交易：該 chunk 實體 upsert ＋ sync_state 水位）
                                           ▼
                                         MySQL
 ```
+
+**分塊寫入**：`Runner.Run`／`RunBatch` 每累積 `writeChunkRows = 500` 列就 `ApplyBatch` 一次（該 chunk 不帶水位）；全部頁完成後再 flush 一次，僅此時帶入本輪水位。中途失敗可能留下先前的 chunk，但 `sync_state.cursor_time` 不動，重跑以冪等 upsert 覆蓋。
 
 **同步核心契約**
 
@@ -176,12 +178,12 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 端點 | 分頁 | 增量／篩選方式 | 批量 IDs | 備註 |
 |------|------|----------------|----------|------|
 | `GET /Invoices` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 主力實體 |
-| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where`（`Date>` 支援，`>=` 不支援） | ❌ 不支援 | 無批量參數，只能逐個或全量 |
-| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`；`where` 可用 OR 條件 | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制 |
-| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 待核對 | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
+| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where`（`Date>` 支援，`>=` 不支援） | ❌ 不支援 | 無批量參數，只能逐個或全量；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
+| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`；`where` 可用 OR 條件 | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
+| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 官方文件列支援（2026-11-17），本批未啟用，維持全量 fetch | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
 | `GET /Accounts` | 不分頁（單次回傳全部） | 全量 | ❌ 不支援 | Month 視窗 → 全量 |
 
-**預設規則**：矩陣中標「待核對」者，未完成核對前一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。
+**預設規則**：矩陣中標「未啟用」或尚未核對的能力，一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。
 
 **月度回補**：`/Invoices` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）；`/Contacts`、`/Accounts` 等不支援日期篩選的端點退化為全量 fetch + 冪等 upsert。
 
@@ -328,7 +330,7 @@ type WebhookBuffer struct {
 
 ## 8. 環境變數
 
-`.env` 已 gitignore，`.env.example` 只放模板不含真值。**必填變數缺一即 `slog.Error` + `os.Exit(1)`，禁止半啟動**；選用變數帶預設值，若已設定則驗格式（正整數）。
+`.env` 已 gitignore，`.env.example` 只放模板不含真值。**必填變數缺一即 `slog.Error` + `os.Exit(1)`，禁止半啟動**；選用變數帶預設值，若已設定則驗格式（正整數或列舉值，如 `LOG_LEVEL`）。
 
 | 變數 | 說明 |
 |------|------|
@@ -343,6 +345,7 @@ type WebhookBuffer struct {
 | `XERO_DAILY_CALL_LIMIT` | 選用；每 tenant 每日呼叫上限，未設定時採 `pkg/config` 內建預設（**禁**硬編碼在限流器） |
 | `WEBHOOK_BUFFER_SIZE` | 選用；webhook buffer 的 batch size，未設定時預設 30 |
 | `WEBHOOK_BUFFER_DELAY` | 選用；webhook buffer flush delay（毫秒），未設定時預設 3000 |
+| `LOG_LEVEL` | 選用；日誌等級 `debug`／`info`／`warn`／`error`（大小寫不敏感），未設定時預設 `info`；非法值啟動即報錯 |
 
 新增變數固定三步：`pkg/config` 讀取並驗證 → 補 `.env.example` → 更新本文件。
 

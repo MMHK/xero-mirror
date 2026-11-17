@@ -48,14 +48,16 @@ Runner.Run
   ├─ 驗證：未知實體／視窗不合法 → 直接回錯
   ├─ buildRequest：依 entitySpecs 決定 If-Modified-Since 與 where
   ├─ xero.Client.GetPages（分頁端點）或 Get（Accounts）
-  ├─ decodePage → pageApplier.handle：逐頁累積在記憶體，不寫 DB
-  └─ total > 0 → store.ApplyBatch：單一交易完成五表 upsert + sync_state
+  ├─ decodePage → pageApplier.handle：逐頁累積，達 writeChunkRows（500）即 flush
+  └─ total > 0 → 最後一次 flush 帶 cursor：五表 upsert + sync_state（同交易）
 ```
 
-- 抓取階段完全不寫 DB；任何一頁 fetch／解析失敗即回錯，DB 保持原狀（cursor 不動）。
+- 分塊寫入：`writeChunkRows = 500`，每頁累積後達門檻即 `flush(nil)`，以 `ApplyBatch` 單一交易寫入並清空待寫 slice；flush 失敗立即回錯且不清空（該批回滾）。
+- 中途失敗時，先前已 flush 的 chunk 留在 DB（短期部分更新可見），但 cursor 未動；`ON DUPLICATE KEY UPDATE` 冪等，重跑不會產生重複列。
+- 最後一次 flush 僅在 `total > 0` 時執行，並帶入本輪最大 `xero_updated_at`（`Cursor` 模式）或 `nil`（月度／batch）。中途剛好 flush 完、待寫 slice 為空時，只要 `maxAt` 有值（`Cursor` 模式）仍會寫入 cursor 更新 `sync_state`。
 - `ApplyBatch` 同一交易內先 upsert 五張實體表，再 upsert `sync_state`（`cursor_time`、`last_run_at`、`status = 'idle'`）；任一步失敗整批回滾。
 - 端點回空陣列（`total == 0`）時不呼叫 `ApplyBatch`，該輪 `last_run_at`／`status` 不會更新。
-- `RunBatch` 先 `dedupIDs`（丟空字串、保首次出現順序），再以 `maxBatchIDs = 30` 分批；**所有分批都成功**後才一次 `ApplyBatch`，任一批失敗即回錯。
+- `RunBatch` 先 `dedupIDs`（丟空字串、保首次出現順序），再以 `maxBatchIDs = 30` 分批；每批同樣分塊 flush，結束時再 flush 一次但不帶 cursor（不推進水位）。
 
 ## 4. cursor 規則
 
@@ -77,14 +79,14 @@ cursor_time = IF(
 
 - 月度與 batch 送 `cursor_time = NULL` → 保留原水位；`last_run_at`／`status` 仍會更新。
 - `Cursor` 模式送實際水位 → 只前進不後退；較舊的值或整批 `xero_updated_at` 皆為 `nil` 時也不推進。
-- 水位與資料同交易提交，因此「資料寫入成功」與「水位前進」必然同時發生或同時不發生。
+- 最後一次 flush 的水位與該 chunk 資料同交易提交，因此「水位前進」與「該批資料寫入成功」必然同時發生或同時不發生；中途 flush 一律送 `NULL`，不推進水位。
 
 ## 5. 失敗語意
 
 | 層級 | 行為 |
 |------|------|
-| 單頁 fetch／解析失敗 | `Run` 回錯，不 `ApplyBatch`；cursor 不動 |
-| `ApplyBatch` 失敗 | 整批回滾，cursor 不動，回錯 |
+| 單頁 fetch／解析失敗 | `Run` 回錯；先前已 flush 的 chunk 留在 DB，cursor 不動（重跑冪等覆蓋） |
+| `ApplyBatch` 失敗 | 該 chunk 整批回滾，先前已 flush 的資料保留，cursor 不動，回錯 |
 | `RunTenant` 單一實體失敗 | `slog.Warn` 後續跑下一個實體 |
 | `RunTenant` 五個實體全失敗 | 回錯（`tenant ... 全部 5 個實體同步皆失敗`） |
 | `RunAllIncremental` 單一 tenant 失敗 | `slog.Warn` 後續跑下一個 tenant |
@@ -116,7 +118,7 @@ SELECT ... FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id
 
 分頁、增量、月度篩選、批量 IDs 的正式能力矩陣見 `doc/spec.md` §5，本文件不重抄。程式端唯一來源是 `pkg/sync/sync.go` 的 `entitySpecs`：
 
-- `supportsSince`：目前只對 Invoices 開啟；其餘實體即使帶 `Cursor`，`buildRequest` 也不會加 `If-Modified-Since`，退化為全量 fetch + 冪等 upsert。
+- `supportsSince`：目前對 Invoices、CreditNotes、Payments 開啟；其餘實體即使帶 `Cursor`，`buildRequest` 也不會加 `If-Modified-Since`，退化為全量 fetch + 冪等 upsert。
 - `monthFilter`：目前只對 Invoices 開啟，組 `Date>=DateTime(...)&&Date<DateTime(...)`；其餘實體月度視窗退化為全量。
 - `supportsBatchIDs`：只對 Invoices、Contacts 開啟，並以 `SupportsBatchIDs` 對外匯出。
 - `paginated`：只對 Accounts 關閉（單次回傳全部）。
@@ -158,7 +160,8 @@ TEST_MYSQL_DSN="root:root@tcp(127.0.0.1:13315)/xero_mirror_test?parseTime=true&l
 
 ## 10. 已知限制
 
-- 單一實體的一次同步會把全部頁面累積在記憶體，最後一次 `ApplyBatch`；資料量大時記憶體與交易時間同步上升。
+- 分塊寫入：每累積 500 列就 `flush` 一次，記憶體上限約 600 列（未達門檻的尾段）＋單頁 JSON；交易時間短，不會因資料量大而拉長。
+- 中途失敗時先前已 flush 的 chunk 會留在 DB（可能見到部分新資料），但 cursor 不會前進；下次重跑以相同的 cursor 重抓，靠 `ON DUPLICATE KEY UPDATE` 冪等覆蓋。
 - 月度視窗對不支援日期篩選的實體退化為全量，`sync --month` 對這些實體等同全量重跑（結果與全量 sync 相同）。
 - `RunBatch` 只支援 Invoices／Contacts；其他實體回 `端點不支援批量 IDs`，正常流程由 buffer 的 `SupportsBatchIDs` 先擋下。
 - `RunTenant` 部分成功時回 `nil`（錯誤已記 log），呼叫端無法從回傳值區分「全成功」與「部分失敗」；需要精確結果時以 log 的 `failed` 欄位為準。

@@ -48,6 +48,7 @@ XERO_TOKEN_ENC_KEY=your_32_bytes_base64_key  # openssl rand -base64 32
 MYSQL_DSN=root:root@tcp(127.0.0.1:3307)/xero_mirror?parseTime=true&loc=UTC
 SYNC_CRON=*/5 * * * *
 HTTP_ADDR=:8080
+LOG_LEVEL=  # 選用：debug|info|warn|error，留空預設 info；要排查分塊寫入時再改成 debug
 ```
 
 **產生 TOKEN_ENC_KEY**：
