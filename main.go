@@ -12,7 +12,7 @@ import (
 )
 
 const usageText = "用法: xero-mirror <sync|serve|auth>\n" +
-	"  sync [-month YYYY-MM]  依 cursor 增量或回補單月\n" +
+	"  sync [-month YYYY-MM] [-entity NAME]  依 cursor 增量、回補單月或只同步指定實體（可併用）\n" +
 	"  serve                  cron + webhook 常駐\n" +
 	"  auth                   一次性授權（token 落地 MySQL）\n"
 

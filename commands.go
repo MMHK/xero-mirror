@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -20,8 +21,9 @@ import (
 	"github.com/mmhk/xero-mirror/pkg/xero"
 )
 
-const syncUsageText = "用法: xero-mirror sync [-month YYYY-MM]\n" +
-	"  --month YYYY-MM  回補單月（逐 tenant 跑五實體）；省略則依 cursor 增量\n"
+const syncUsageText = "用法: xero-mirror sync [-month YYYY-MM] [-entity NAME]\n" +
+	"  --month YYYY-MM  回補單月（預設逐 tenant 跑五實體；可與 --entity 併用）\n" +
+	"  --entity NAME    只同步指定實體（contacts|accounts|invoices|creditnotes|payments；可與 --month 併用）\n"
 
 // readHeaderTimeout 是 HTTP server 讀請求 header 的上限，避免無 timeout 的常駐 server。
 const readHeaderTimeout = 10 * time.Second
@@ -29,12 +31,13 @@ const readHeaderTimeout = 10 * time.Second
 // shutdownTimeout 是優雅關機流程的總等待上限，cron／HTTP server／buffer 關閉共用同一預算。
 const shutdownTimeout = 30 * time.Second
 
-// runSync 依 --month 走月度回補或 cursor 增量：載入設定、連上 MySQL 後跑全部 tenant。
+// runSync 依 --month／--entity 走月度回補或 cursor 增量：載入設定、連上 MySQL 後跑全部 tenant。
 func runSync(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, syncUsageText) }
 	month := fs.String("month", "", "回補月份，格式 YYYY-MM")
+	entity := fs.String("entity", "", "只同步指定實體")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("解析 sync 參數: %w", err)
 	}
@@ -42,6 +45,10 @@ func runSync(ctx context.Context, args []string) error {
 		return fmt.Errorf("未知參數 %q", fs.Arg(0))
 	}
 	w, err := syncWindow(*month)
+	if err != nil {
+		return err
+	}
+	entityID, hasEntity, err := parseSyncEntity(*entity)
 	if err != nil {
 		return err
 	}
@@ -58,22 +65,51 @@ func runSync(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runSyncMode(ctx, runner, w, *month)
+	return runSyncMode(ctx, runner, w, *month, entityID, hasEntity)
 }
 
-// runSyncMode 依視窗分派月度回補或 cursor 增量，成功後記錄完成 log（mode 與 window 不重複 key）。
-func runSyncMode(ctx context.Context, runner *sync.Runner, w *sync.Window, month string) error {
-	if w == nil {
-		if err := runner.RunAllIncremental(ctx); err != nil {
-			return err
-		}
-		slog.Info("sync 完成", "mode", "incremental")
-		return nil
+// parseSyncEntity 解析 --entity；空字串代表未指定，不合法值在連 DB 前就回錯。
+func parseSyncEntity(raw string) (sync.Entity, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false, nil
 	}
-	if err := runner.RunAllMonth(ctx, *w.MonthStart, *w.MonthEnd); err != nil {
+	e, ok := sync.ParseEntity(raw)
+	if !ok {
+		return "", false, fmt.Errorf("--entity 不合法: %q（可用 contacts|accounts|invoices|creditnotes|payments）", raw)
+	}
+	return e, true, nil
+}
+
+// runSyncMode 依視窗與 entity 分派四種組合，成功後記錄完成 log（month 帶 window、entity 模式帶 entity）。
+func runSyncMode(ctx context.Context, runner *sync.Runner, w *sync.Window, month string,
+	entity sync.Entity, hasEntity bool) error {
+	var err error
+	if w == nil {
+		if hasEntity {
+			err = runner.RunEntityIncremental(ctx, entity)
+		} else {
+			err = runner.RunAllIncremental(ctx)
+		}
+	} else {
+		if hasEntity {
+			err = runner.RunEntityMonth(ctx, *w.MonthStart, *w.MonthEnd, entity)
+		} else {
+			err = runner.RunAllMonth(ctx, *w.MonthStart, *w.MonthEnd)
+		}
+	}
+	if err != nil {
 		return err
 	}
-	slog.Info("sync 完成", "mode", "month", "window", month)
+	switch {
+	case w != nil && hasEntity:
+		slog.Info("sync 完成", "mode", "month", "window", month, "entity", entity)
+	case w != nil:
+		slog.Info("sync 完成", "mode", "month", "window", month)
+	case hasEntity:
+		slog.Info("sync 完成", "mode", "incremental", "entity", entity)
+	default:
+		slog.Info("sync 完成", "mode", "incremental")
+	}
 	return nil
 }
 

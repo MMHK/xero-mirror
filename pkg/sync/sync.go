@@ -176,16 +176,22 @@ func (r *Runner) RunIncremental(ctx context.Context, tenantID string, entity Ent
 // RunTenant 依固定順序跑單一 tenant 的五個實體增量；單一實體失敗只 Warn 續跑，
 // 全部實體都失敗才回錯，部分成功回 nil（錯誤已記 log）。
 func (r *Runner) RunTenant(ctx context.Context, tenantID string) error {
+	return r.runTenantEntities(ctx, tenantID, Entities())
+}
+
+// runTenantEntities 是單一 tenant × 指定實體的增量迴圈；單一實體失敗只 Warn 續跑，
+// 全部實體都失敗才回錯，部分成功回 nil（錯誤已記 log）。
+func (r *Runner) runTenantEntities(ctx context.Context, tenantID string, entities []Entity) error {
 	slog.Info("開始 tenant 同步", "tenant", tenantID)
 	failed := 0
-	for _, entity := range Entities() {
+	for _, entity := range entities {
 		if err := r.RunIncremental(ctx, tenantID, entity); err != nil {
 			failed++
 			slog.Warn("實體同步失敗，續跑其餘實體",
 				"tenant", tenantID, "entity", entity, "err", err)
 		}
 	}
-	if failed == len(Entities()) {
+	if failed == len(entities) {
 		return fmt.Errorf("tenant %s 的全部 %d 個實體同步皆失敗", tenantID, failed)
 	}
 	slog.Info("tenant 同步結束", "tenant", tenantID, "failed", failed)
@@ -195,13 +201,27 @@ func (r *Runner) RunTenant(ctx context.Context, tenantID string) error {
 // RunAllIncremental 列出全部 tenant 並逐個跑五實體增量；單一 tenant 失敗只 Warn 續跑，
 // 回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
 func (r *Runner) RunAllIncremental(ctx context.Context) error {
+	return r.runAllByEntities(ctx, Entities())
+}
+
+// RunEntityIncremental 對全部 active tenant 跑單一實體增量；未知實體在讀 tenant 清單前回錯。
+func (r *Runner) RunEntityIncremental(ctx context.Context, entity Entity) error {
+	if _, ok := entitySpecs[entity]; !ok {
+		return fmt.Errorf("未知的實體 %q", entity)
+	}
+	return r.runAllByEntities(ctx, []Entity{entity})
+}
+
+// runAllByEntities 列出全部 tenant 並逐個跑指定實體增量；單一 tenant 失敗只 Warn 續跑，
+// 回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
+func (r *Runner) runAllByEntities(ctx context.Context, entities []Entity) error {
 	tenants, err := r.store.ListTenants(ctx)
 	if err != nil {
 		return fmt.Errorf("讀取 tenant 清單: %w", err)
 	}
 	failed := 0
 	for _, t := range tenants {
-		if err := r.RunTenant(ctx, t.TenantID); err != nil {
+		if err := r.runTenantEntities(ctx, t.TenantID, entities); err != nil {
 			failed++
 			slog.Warn("tenant 同步失敗，續跑下一個 tenant", "tenant", t.TenantID, "err", err)
 		}
@@ -216,6 +236,20 @@ func (r *Runner) RunAllIncremental(ctx context.Context) error {
 // RunAllMonth 逐 tenant × Entities() 跑指定月度視窗（UTC 半開區間）；單一實體失敗只 Warn
 // 續跑，任一實體失敗即記該 tenant 失敗，回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
 func (r *Runner) RunAllMonth(ctx context.Context, start, end time.Time) error {
+	return r.runAllMonthByEntities(ctx, start, end, Entities())
+}
+
+// RunEntityMonth 對全部 active tenant 跑單一實體的月度視窗；未知實體在讀 tenant 清單前回錯。
+func (r *Runner) RunEntityMonth(ctx context.Context, start, end time.Time, entity Entity) error {
+	if _, ok := entitySpecs[entity]; !ok {
+		return fmt.Errorf("未知的實體 %q", entity)
+	}
+	return r.runAllMonthByEntities(ctx, start, end, []Entity{entity})
+}
+
+// runAllMonthByEntities 逐 tenant × 指定實體跑月度視窗（UTC 半開區間）；單一實體失敗只 Warn
+// 續跑，任一實體失敗即記該 tenant 失敗，回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
+func (r *Runner) runAllMonthByEntities(ctx context.Context, start, end time.Time, entities []Entity) error {
 	tenants, err := r.store.ListTenants(ctx)
 	if err != nil {
 		return fmt.Errorf("讀取 tenant 清單: %w", err)
@@ -224,7 +258,7 @@ func (r *Runner) RunAllMonth(ctx context.Context, start, end time.Time) error {
 	failed := 0
 	for _, t := range tenants {
 		tenantFailed := false
-		for _, entity := range Entities() {
+		for _, entity := range entities {
 			if err := r.Run(ctx, t.TenantID, entity, w); err != nil {
 				tenantFailed = true
 				slog.Warn("月度回補失敗，續跑其餘實體",

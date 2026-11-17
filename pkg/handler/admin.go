@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/mmhk/xero-mirror/pkg/store"
@@ -16,18 +15,6 @@ import (
 
 // errBadRequest 代表參數驗證失敗，Handle 據此回 400；不帶 wrapper type。
 var errBadRequest = errors.New("請求參數不合法")
-
-// adminEntityAliases 是大小寫不敏感的 entity 名稱對照（含單數別名）。
-var adminEntityAliases = map[string]pkgsync.Entity{
-	"contacts":     pkgsync.EntityContacts,
-	"accounts":     pkgsync.EntityAccounts,
-	"invoices":     pkgsync.EntityInvoices,
-	"invoice":      pkgsync.EntityInvoices,
-	"creditnotes":  pkgsync.EntityCreditNotes,
-	"credit_notes": pkgsync.EntityCreditNotes,
-	"payments":     pkgsync.EntityPayments,
-	"payment":      pkgsync.EntityPayments,
-}
 
 // AdminHandler 處理 POST /admin/sync：手動觸發單一 tenant／entity 的同步。
 type AdminHandler struct {
@@ -77,9 +64,9 @@ func (h *AdminHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// parseAdminEntity 以大小寫不敏感方式對照 entity 名稱；未知值回 errBadRequest。
+// parseAdminEntity 以 pkg/sync 的共用別名表解析 entity 名稱；未知值回 errBadRequest。
 func parseAdminEntity(raw string) (pkgsync.Entity, error) {
-	if e, ok := adminEntityAliases[strings.ToLower(strings.TrimSpace(raw))]; ok {
+	if e, ok := pkgsync.ParseEntity(raw); ok {
 		return e, nil
 	}
 	return "", errBadRequest

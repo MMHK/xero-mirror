@@ -38,6 +38,7 @@ go build -o xero-mirror.exe .
 ```bash
 ./xero-mirror.exe sync                  # 依上次進度增量同步
 ./xero-mirror.exe sync --month 2026-05  # 回補指定月份
+./xero-mirror.exe sync --entity payments # 只同步指定實體
 ```
 
 資料庫結構會在啟動時自動建立，不需手動匯入 SQL。

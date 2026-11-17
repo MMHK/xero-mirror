@@ -345,3 +345,89 @@ func TestRunFetchFailureKeepsCursor(t *testing.T) {
 	require.NotNil(t, got.CursorTime)
 	require.True(t, got.CursorTime.Equal(cursor), "抓取失敗不得推進 cursor")
 }
+
+// TestParseEntity 驗證別名表大小寫不敏感、可含頭尾空白，未知值回 false（表驅動）。
+func TestParseEntity(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want Entity
+		ok   bool
+	}{
+		{"contacts", EntityContacts, true},
+		{"contact", EntityContacts, true},
+		{"accounts", EntityAccounts, true},
+		{"account", EntityAccounts, true},
+		{"  Invoices ", EntityInvoices, true},
+		{"invoice", EntityInvoices, true},
+		{"creditnotes", EntityCreditNotes, true},
+		{"credit_notes", EntityCreditNotes, true},
+		{"creditnote", EntityCreditNotes, true},
+		{"payment", EntityPayments, true},
+		{"nonsense", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		e, ok := ParseEntity(c.raw)
+		require.Equal(t, c.ok, ok, c.raw)
+		require.Equal(t, c.want, e, c.raw)
+	}
+}
+
+// TestRunEntityRejectsUnknown 驗證未知實體在讀 tenant 清單前就回錯（store 為 nil 也不得 panic）。
+func TestRunEntityRejectsUnknown(t *testing.T) {
+	r := &Runner{}
+	unknown := Entity("NONSENSE")
+	require.ErrorContains(t, r.RunEntityIncremental(context.Background(), unknown), "未知的實體")
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	require.ErrorContains(t, r.RunEntityMonth(context.Background(), start, start.AddDate(0, 1, 0), unknown), "未知的實體")
+}
+
+// TestRunEntityIncrementalOnlyRequestsEntity 驗證指定 payments 時只打 /Payments，不請求其他實體。
+func TestRunEntityIncrementalOnlyRequestsEntity(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t17entity-payments"
+	var all, invoices atomic.Int32
+	r, st := newDBRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Xero-tenant-id") == tenant {
+			all.Add(1)
+			if req.URL.Path == "/Invoices" {
+				invoices.Add(1)
+			}
+		}
+		if req.URL.Path != "/Payments" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, emptyByEntity[EntityPayments])
+	})
+	require.NoError(t, insertTestTenant(ctx, st, tenant))
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, r.RunEntityIncremental(ctx, EntityPayments))
+	require.Equal(t, int32(1), all.Load(), "指定 payments 時只應送出一次請求")
+	require.Zero(t, invoices.Load(), "指定 payments 時不得請求 /Invoices")
+}
+
+// TestRunEntityMonthOnlyRequestsEntity 驗證月度模式只打指定端點、資料寫入但 cursor 不推進。
+func TestRunEntityMonthOnlyRequestsEntity(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t17entity-month"
+	var all atomic.Int32
+	r, st := newDBRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Xero-tenant-id") == tenant {
+			all.Add(1)
+		}
+		if req.URL.Path != "/Payments" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, `{"Payments":[{"PaymentID":"pay-month-1","Amount":10.0000,"Date":"/Date(1746057600000+0000)/","UpdatedDateUTC":"/Date(1746057600000+0000)/"}]}`)
+	})
+	require.NoError(t, insertTestTenant(ctx, st, tenant))
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, r.RunEntityMonth(ctx, start, start.AddDate(0, 1, 0), EntityPayments))
+	require.Equal(t, int32(1), all.Load(), "月度模式只應請求 /Payments 一次")
+	state, err := st.GetSyncState(ctx, tenant, string(EntityPayments))
+	require.NoError(t, err, "資料寫入後應有 sync_state")
+	require.Nil(t, state.CursorTime, "月度模式不得推進 cursor")
+}

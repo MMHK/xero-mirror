@@ -352,6 +352,7 @@ type WebhookBuffer struct {
 go build -o xero-mirror.exe .            # 唯一 binary
 go run . sync --month 2026-05            # 回補/重跑單月（不推進 cursor）
 go run . sync                            # 依 cursor 增量（全部 active tenant）
+go run . sync --entity payments          # 只同步指定實體（contacts|accounts|invoices|creditnotes|payments）
 go run . serve                           # cron + webhook 常駐
 go run . auth                            # 一次性授權（token 落地 MySQL）
 go fmt ./... && go vet ./...             # 提交前必跑
@@ -369,7 +370,7 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
 
 變更順序固定，不得跳步：**改 `pkg/store/migrations/*.sql` → `go build` → 跑任一 subcommand 觸發 migrate → `go test`**。
 
-- **`sync` 語意**：無 `--month` 與 cron 同走 `Runner.RunAllIncremental`；`--month YYYY-MM` 走 `Runner.RunAllMonth`。月度回補**不推進** `sync_state.cursor_time`（`Batch.Cursor = nil`，見 §3 規則 6）。部分 tenant 失敗只 `slog.Warn` 並續跑，最後回 `同步失敗 N 個 tenant`，subcommand 以 exit 1 結束；cron 對同一個錯誤只 Warn，不中斷排程。
+- **`sync` 語意**：無 `--month` 與 cron 同走 `Runner.RunAllIncremental`；`--month YYYY-MM` 走 `Runner.RunAllMonth`；`--entity NAME`（別名見 `pkg/sync.ParseEntity`）改走 `Runner.RunEntityIncremental`／`Runner.RunEntityMonth`，只跑指定實體。月度回補**不推進** `sync_state.cursor_time`（`Batch.Cursor = nil`，見 §3 規則 6）。部分 tenant 失敗只 `slog.Warn` 並續跑，最後回 `同步失敗 N 個 tenant`，subcommand 以 exit 1 結束；cron 對同一個錯誤只 Warn，不中斷排程。
 - 回滾：人工執行對應 `.down.sql`，並刪掉 `schema_migrations` 裡該版本那一列（程式不自動跑 down）。
 - 建置與單元測試可在 host 直接跑；需要 DB 的整合測試走 `docker compose -f docker-compose.test.yml up -d`（測試 MySQL 不保留資料），DSN 以 `TEST_MYSQL_DSN` 傳入。
 - migration 與 `pkg/store` 對應的 SQL 修改要同一 commit；commit 前看 `git status`，用 Conventional Commits。

@@ -33,6 +33,9 @@ type Runner struct { client *xero.Client; store *store.Store }
 | `RunTenant(ctx, tenantID)` | 單一 tenant × `Entities()` 增量 | 依 `RunIncremental` |
 | `RunAllIncremental(ctx)` | 全部 active tenant 增量（`sync`／cron） | 依 `RunTenant` |
 | `RunAllMonth(ctx, start, end)` | 全部 active tenant 指定月度視窗 | ❌ |
+| `RunEntityIncremental(ctx, entity)` | 全部 active tenant × 單一實體增量（`sync --entity`） | 依 `RunIncremental` |
+| `RunEntityMonth(ctx, start, end, entity)` | 全部 active tenant × 單一實體月度視窗（`sync --month --entity`） | ❌ |
+| `ParseEntity(raw)` | 大小寫不敏感解析 entity 名稱（含單數別名） | — |
 | `Entities()` | 固定順序：Invoices、CreditNotes、Payments、Contacts、Accounts | — |
 | `SupportsBatchIDs(e)` | 端點是否支援 `?IDs=`（供 webhook buffer 判斷） | — |
 
@@ -86,6 +89,7 @@ cursor_time = IF(
 | `RunTenant` 五個實體全失敗 | 回錯（`tenant ... 全部 5 個實體同步皆失敗`） |
 | `RunAllIncremental` 單一 tenant 失敗 | `slog.Warn` 後續跑下一個 tenant |
 | `RunAllMonth` 任一實體失敗 | 記該 tenant 失敗，續跑其餘 entity／tenant |
+| `RunEntityIncremental`／`RunEntityMonth` 未知實體 | 讀 tenant 清單前直接回錯 |
 | `ListTenants` 失敗 | 直接回錯，不跑任何 tenant |
 
 `RunAllIncremental` 與 `RunAllMonth` 都以 tenant 為失敗計數單位，最後回 `同步失敗 N 個 tenant`；全成功回 `nil`。非致命錯誤一律 `slog.Warn` + 降級續跑，單一 entity／tenant 失敗不得讓整輪崩潰。
@@ -125,6 +129,7 @@ SELECT ... FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id
 |------|------|----------|
 | `sync`（無 `--month`） | `commands.go` `runSync` → `runSyncMode` | `RunAllIncremental` |
 | `sync --month YYYY-MM` | `runSync` → `syncWindow` 組 UTC 半開區間 | `RunAllMonth` |
+| `sync --entity NAME` | `runSync` → `parseSyncEntity` → `runSyncMode` | `RunEntityIncremental`／`RunEntityMonth` |
 | cron | `commands.go` `runCronSync` | `RunAllIncremental` |
 | `POST /admin/sync` | `pkg/handler` `AdminHandler` | `Run`（單 tenant／entity） |
 | `POST /webhook` | `pkg/handler` `WebhookHandler` → `WebhookBuffer` | `RunBatch`（僅 Invoices／Contacts） |
@@ -134,6 +139,7 @@ SELECT ... FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id
 ```bash
 go run . sync                            # 依 cursor 增量（全部 active tenant）
 go run . sync --month 2026-05            # 月度回補（不推進 cursor）
+go run . sync --entity payments          # 只同步指定實體
 go run . serve                           # cron 增量 + webhook
 
 go test ./pkg/sync                       # 本模組全部測試
