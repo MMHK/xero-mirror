@@ -3,6 +3,10 @@
 # 停止：docker compose down
 # 清除資料：docker compose down -v
 # 連線：mysql -h 127.0.0.1 -P 3307 -u root -proot xero_mirror
+#
+# 建構 image：docker compose build
+# 只建 app：  docker compose build app
+# 推送到 registry：docker push mmhk/xero-mirror:latest
 
 services:
   mysql:
@@ -28,6 +32,24 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mmhk/xero-mirror
+    container_name: xero-mirror-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # Docker 內部 MySQL 連線（覆寫 .env 的 127.0.0.1:3307）
+      MYSQL_DSN: root:root@tcp(mysql:3306)/xero_mirror?parseTime=true&loc=UTC
+      # container 內監聽所有介面
+      HTTP_ADDR: ":8080"
 
 volumes:
   mysql-data:

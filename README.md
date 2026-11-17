@@ -43,6 +43,27 @@ go build -o xero-mirror.exe .
 
 資料庫結構會在啟動時自動建立，不需手動匯入 SQL。
 
+## Docker 建構
+
+```bash
+# 建構 image
+docker compose build                    # 透過 compose 建構（含 MySQL）
+docker build -t mmhk/xero-mirror .      # 單獨建構 image
+
+# 執行（搭配 compose，MySQL 自動接線）
+docker compose up -d                    # 同時啟動 MySQL + app
+
+# 單獨執行 image（需自行處理 MySQL 連線）
+docker run --rm mmhk/xero-mirror auth
+docker run --rm mmhk/xero-mirror serve
+docker run --rm mmhk/xero-mirror sync --month 2026-05
+
+# 推送至 registry
+docker push mmhk/xero-mirror:latest
+```
+
+Compose 啟動時，app 會自動等待 MySQL 健康後才啟動，並使用 Docker 內部網路連線（`mysql:3306`）。
+
 ## Web 介面
 
 `serve` 啟動後可直接在瀏覽器使用。網址以 `.env` 的 `HTTP_ADDR` 為準（例：`HTTP_ADDR=:8080` → `http://localhost:8080/`）：
