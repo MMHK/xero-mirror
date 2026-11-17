@@ -42,6 +42,19 @@ go build -o xero-mirror.exe .
 
 資料庫結構會在啟動時自動建立，不需手動匯入 SQL。
 
+## Web 介面
+
+`serve` 啟動後可直接在瀏覽器使用。網址以 `.env` 的 `HTTP_ADDR` 為準（例：`HTTP_ADDR=:8080` → `http://localhost:8080/`）：
+
+- `/` — 專案介紹頁
+- `/docs` — Swagger UI
+- `/openapi.json` — OpenAPI 3.0.3 文件
+- `/health` — 健康檢查
+
+頁面樣式（Tailwind v4）與 Swagger UI 皆由 CDN 載入，無需 npm 或任何建置流程；離線內網只影響樣式，API 端點照常運作。
+
+`/admin/sync` 無內建認證，僅供內網或反向代理後方使用，請勿直接暴露公網。
+
 ## 更多文件
 
 - [`doc/spec.md`](doc/spec.md) — 完整架構與規格

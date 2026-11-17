@@ -6,12 +6,16 @@ import (
 	"net/http"
 )
 
-// NewMux 註冊三條路徑；非允許方法由各 Handler 回 405，未知路徑由 ServeMux 回 404。
-func NewMux(webhook *WebhookHandler, health *HealthHandler, admin *AdminHandler) *http.ServeMux {
+// NewMux 註冊 webhook／health／admin 與介紹頁／Swagger UI／OpenAPI；
+// 非允許方法由各 Handler 回 405，未知路徑由 PageHandler 的 catch-all 回 404。
+func NewMux(webhook *WebhookHandler, health *HealthHandler, admin *AdminHandler, page *PageHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", webhook.Handle)
 	mux.HandleFunc("/health", health.Handle)
 	mux.HandleFunc("/admin/sync", admin.Handle)
+	mux.HandleFunc("/", page.Handle)
+	mux.HandleFunc("/docs", page.Handle)
+	mux.HandleFunc("/openapi.json", page.Handle)
 	return mux
 }
 

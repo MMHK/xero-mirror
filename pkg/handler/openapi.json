@@ -1,0 +1,370 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "xero-mirror API",
+    "version": "0.1.0",
+    "description": "xero-mirror 把 Xero Accounting 資料單向鏡射到本地 MySQL，提供 webhook 接收、健康檢查與手動觸發同步三個端點。本服務僅供內網部署，`/admin/sync` 無內建認證，必須置於私有網路或反向代理之後。本服務端點只允許 GET／POST，其他方法一律回 405 並帶 Allow header；未知路徑回 404。"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "健康檢查",
+        "description": "只對資料庫做 ping，不涉及業務邏輯。DB 可連回 200，失敗先記錄警告再回 503。",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "資料庫連線正常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthOk"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "description": "資料庫 ping 失敗。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthUnhealthy"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhook": {
+      "post": {
+        "summary": "Xero webhook 回呼",
+        "description": "以 HMAC-SHA256 對 raw body 計算簽章後 base64，與 `x-xero-signature` header 做 constant-time 比對；簽章驗證前不解析 body。驗簽通過後才解析事件、去重並入列 `webhook_events` 與 `sync_jobs`。驗簽失敗回 401、body 或事件不合法回 400、入列失敗回 500 讓 Xero 重送。",
+        "operationId": "postWebhook",
+        "parameters": [
+          {
+            "name": "x-xero-signature",
+            "in": "header",
+            "required": true,
+            "description": "Xero 以 webhook signing key 對 raw body 計算的 HMAC-SHA256 簽章（base64 編碼）。",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Xero webhook 事件批次；JSON tag 沿用 Xero 原樣 camelCase。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "驗簽通過且事件已入列（或全部略過）；回應 body 為空。"
+          },
+          "400": {
+            "description": "raw body 超過上限、無法解析 JSON，或 `eventDateUtc` 格式不合法。"
+          },
+          "401": {
+            "description": "`x-xero-signature` 與 HMAC-SHA256 計算結果不符。"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "寫入 `webhook_events`／`sync_jobs` 失敗；刻意回 500 讓 Xero 重送，避免事件遺失。"
+          }
+        }
+      }
+    },
+    "/admin/sync": {
+      "post": {
+        "summary": "手動觸發同步",
+        "description": "對單一 tenant／entity 觸發同步，參數可用 query string 或 `application/x-www-form-urlencoded` form 傳送（兩者皆可，同名字段以 form 為準）。`tenant`、`entity` 必填，缺一或 `entity` 未知回 400 且不呼叫 runner。省略 `month` 時依 `sync_state.cursor_time` 增量，無紀錄視為首跑全量。此端點無內建認證，只可部署於私有網路或反向代理後方。",
+        "operationId": "postAdminSync",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": true,
+            "description": "Xero tenant ID；必填。",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entity",
+            "in": "query",
+            "required": true,
+            "description": "要同步的實體；大小寫不敏感，接受 contacts／accounts／invoices／invoice／creditnotes／credit_notes／payments／payment。必填。",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "month",
+            "in": "query",
+            "required": false,
+            "description": "選填；`YYYY-MM` 格式，有值時同步該月 00:00 UTC 起、下月 00:00 止的半開視窗。",
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+              "example": "2026-05"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "與 query 參數等價的表單欄位；query 或 form 皆可。",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSyncForm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "同步成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusOk"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "表單解析失敗、`tenant`／`entity` 缺失、`entity` 未知，或 `month` 不是 `YYYY-MM`。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "description": "讀取同步狀態失敗或同步失敗。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncFailed"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthOk": {
+        "type": "object",
+        "description": "健康檢查成功回應。",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        }
+      },
+      "HealthUnhealthy": {
+        "type": "object",
+        "description": "健康檢查失敗回應。",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "unhealthy"
+            ]
+          }
+        }
+      },
+      "StatusOk": {
+        "type": "object",
+        "description": "通用成功回應。",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "通用錯誤回應；`error` 為繁體中文訊息。",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "tenant 與 entity 為必填且 entity 必須合法"
+          }
+        }
+      },
+      "SyncFailed": {
+        "type": "object",
+        "description": "同步失敗回應。",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "同步失敗"
+          }
+        }
+      },
+      "AdminSyncForm": {
+        "type": "object",
+        "description": "`/admin/sync` 的表單欄位，語意與 query 參數相同。",
+        "required": [
+          "tenant",
+          "entity"
+        ],
+        "properties": {
+          "tenant": {
+            "type": "string",
+            "description": "Xero tenant ID；必填。"
+          },
+          "entity": {
+            "type": "string",
+            "description": "要同步的實體；大小寫不敏感，接受 contacts／accounts／invoices／invoice／creditnotes／credit_notes／payments／payment。"
+          },
+          "month": {
+            "type": "string",
+            "description": "選填；`YYYY-MM` 格式。",
+            "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+            "example": "2026-05"
+          }
+        }
+      },
+      "WebhookPayload": {
+        "type": "object",
+        "description": "Xero webhook payload 概要；欄位名稱照 Xero 原樣 camelCase。",
+        "required": [
+          "firstEventSequence",
+          "lastEventSequence",
+          "entropy",
+          "events"
+        ],
+        "properties": {
+          "firstEventSequence": {
+            "type": "integer",
+            "description": "本批次第一個事件的序號。"
+          },
+          "lastEventSequence": {
+            "type": "integer",
+            "description": "本批次最後一個事件的序號。"
+          },
+          "entropy": {
+            "type": "string",
+            "description": "Xero 提供的隨機值，用於降低重放風險。"
+          },
+          "events": {
+            "type": "array",
+            "description": "事件清單；未支援的 `eventCategory` 會略過而不影響其他事件。",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          }
+        }
+      },
+      "WebhookEvent": {
+        "type": "object",
+        "description": "單一 Xero webhook 事件。",
+        "required": [
+          "tenantId",
+          "tenantType",
+          "resourceUrl",
+          "resourceId",
+          "eventDateUtc",
+          "eventType",
+          "eventCategory"
+        ],
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "description": "Xero tenant ID；缺失時該事件略過。"
+          },
+          "tenantType": {
+            "type": "string",
+            "description": "tenant 類型，例如 `ORGANISATION`。"
+          },
+          "resourceUrl": {
+            "type": "string",
+            "description": "資源的 API 路徑。"
+          },
+          "resourceId": {
+            "type": "string",
+            "description": "資源的 Xero GUID；與 `eventDateUtc` 合併做去重鍵。缺失時該事件略過。"
+          },
+          "eventDateUtc": {
+            "type": "string",
+            "description": "事件發生時間（UTC，無時區標記，例如 `2026-05-01T00:12:34.567`）。格式不合法時整批回 400。"
+          },
+          "eventType": {
+            "type": "string",
+            "description": "事件類型；保留 `CREATE`／`UPDATE`／`DELETE` 作為列舉，其他值會被記為 `unknown`，不影響事件入列。",
+            "enum": [
+              "CREATE",
+              "UPDATE",
+              "DELETE"
+            ]
+          },
+          "eventCategory": {
+            "type": "string",
+            "description": "事件分類；目前支援 `INVOICE`、`CONTACT`、`CREDITNOTE`、`PAYMENT`，其他分類（如 `SUBSCRIPTION`）略過不寫 DB。",
+            "enum": [
+              "INVOICE",
+              "CONTACT",
+              "CREDITNOTE",
+              "PAYMENT",
+              "SUBSCRIPTION"
+            ]
+          }
+        }
+      }
+    },
+    "responses": {
+      "MethodNotAllowed": {
+        "description": "方法不允許；本服務端點只接受 GET／POST，回應帶 `Allow` header 標示允許的方法。",
+        "headers": {
+          "Allow": {
+            "description": "允許的 HTTP 方法。",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

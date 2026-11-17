@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xero-mirror — Xero → MySQL 單向鏡射</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="bg-[#f6f8fa] font-sans text-[#1f2328] antialiased">
+
+<header class="border-b border-[#d1d9e0] bg-white">
+  <div class="mx-auto flex h-16 max-w-5xl items-center justify-between px-6">
+    <a href="/" class="flex items-center gap-2">
+      <span class="rounded-md bg-[#1f2328] px-2 py-0.5 font-mono text-xs text-white">xm</span>
+      <span class="text-[15px] font-semibold">xero-mirror</span>
+      <span class="hidden text-sm font-normal text-[#59636e] sm:inline">Xero → MySQL</span>
+    </a>
+  </div>
+</header>
+
+<main class="mx-auto max-w-5xl space-y-6 px-6 py-10">
+
+  <section class="rounded-lg border border-[#d1d9e0] bg-white p-8">
+    <h1 class="text-3xl font-semibold tracking-tight">把 Xero 會計資料鏡射到你的 MySQL</h1>
+    <p class="mt-3 max-w-2xl text-[15px] leading-7 text-[#59636e]">
+      xero-mirror 是一支常駐的 Go 服務，把 Xero Accounting 的發票、聯絡人與設定資料單向同步到本地 MySQL。
+      整個過程只讀取 Xero，不會寫回任何資料；來源端永遠是唯一的事實來源。
+    </p>
+    <div class="mt-5 flex flex-wrap gap-2">
+      <span class="rounded-full border border-[#d1d9e0] bg-[#f6f8fa] px-3 py-1 text-xs font-medium text-[#59636e]">Go 1.24</span>
+      <span class="rounded-full border border-[#d1d9e0] bg-[#f6f8fa] px-3 py-1 text-xs font-medium text-[#59636e]">MySQL 8.4</span>
+      <span class="rounded-full border border-[#d1d9e0] bg-[#f6f8fa] px-3 py-1 text-xs font-medium text-[#59636e]">Apache-2.0</span>
+      <span class="rounded-full border border-[#d1d9e0] bg-[#f6f8fa] px-3 py-1 text-xs font-medium text-[#59636e]">單向同步</span>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="mb-3 text-base font-semibold">主要特性</h2>
+    <div class="grid gap-4 sm:grid-cols-2">
+      <div class="rounded-lg border border-[#d1d9e0] bg-white p-5">
+        <h3 class="text-sm font-semibold">四種觸發同步</h3>
+        <p class="mt-2 text-sm leading-6 text-[#59636e]">
+          支援 cron 排程、cursor 增量、指定月份的月度回補，以及 Xero webhook 觸發的批次同步，四條路徑共用同一套同步核心。
+        </p>
+      </div>
+      <div class="rounded-lg border border-[#d1d9e0] bg-white p-5">
+        <h3 class="text-sm font-semibold">冪等 upsert</h3>
+        <p class="mt-2 text-sm leading-6 text-[#59636e]">
+          以 Xero ID 為鍵寫入，同一批資料重跑結果相同；中斷後可從 cursor 續跑，不會產生重複資料列。
+        </p>
+      </div>
+      <div class="rounded-lg border border-[#d1d9e0] bg-white p-5">
+        <h3 class="text-sm font-semibold">憑證加密</h3>
+        <p class="mt-2 text-sm leading-6 text-[#59636e]">
+          OAuth2 token 以 AES-256-GCM 加密後存入 MySQL，refresh 採單飛輪換，新 access 與 refresh token 同一交易寫回。
+        </p>
+      </div>
+      <div class="rounded-lg border border-[#d1d9e0] bg-white p-5">
+        <h3 class="text-sm font-semibold">軟刪除鏡射</h3>
+        <p class="mt-2 text-sm leading-6 text-[#59636e]">
+          Xero 以 DELETE 或 ARCHIVED 標記的資料照實保留狀態，不因 API 未回傳而刪除本地列，完整鏡射來源端現況。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="rounded-lg border border-[#d1d9e0] bg-white p-6">
+    <h2 class="text-base font-semibold">快速開始</h2>
+    <p class="mt-1 text-sm text-[#59636e]">
+      先複製 <span class="font-mono">.env.example</span> 為 <span class="font-mono">.env</span> 並填入 Xero 憑證，再啟動資料庫與服務。
+    </p>
+    <pre class="mt-4 overflow-x-auto rounded-md border border-[#d1d9e0] bg-[#f6f8fa] p-4 font-mono text-sm"><code>docker compose up -d
+./xero-mirror.exe auth
+./xero-mirror.exe serve</code></pre>
+  </section>
+
+  <footer class="border-t border-[#d1d9e0] py-6 text-xs text-[#59636e]">
+    <span class="font-mono font-semibold">xero-mirror</span>
+    <span class="ml-2">本服務僅供內網部署；專案文件見 repo 的 <span class="font-mono">doc/</span>，程式碼遵循 <span class="font-mono">AGENTS.md</span>。</span>
+  </footer>
+
+</main>
+
+</body>
+</html>

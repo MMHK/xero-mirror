@@ -306,6 +306,9 @@ type WebhookBuffer struct {
 | `POST` | `/webhook` | Xero 回呼 | HMAC-SHA256 驗簽；成功 `200`、簽章錯 `401`、body 不合法 `400` |
 | `GET` | `/health` | 健康檢查 | DB ping 正常 `200`（body `{"status":"ok"}`），異常 `503`（`{"status":"unhealthy"}`） |
 | `POST` | `/admin/sync` | 手動觸發同步 | 參數 `entity` / `tenant` / `month`（query 或 form）；僅允許 `POST` |
+| `GET` | `/` | 介紹頁 | 靜態 `text/html`；非 `/` 的未知路徑回 `404` |
+| `GET` | `/docs` | Swagger UI | 靜態 `text/html`，由 CDN 載入 swagger-ui-dist 並讀 `/openapi.json` |
+| `GET` | `/openapi.json` | OpenAPI 文件 | `application/json`；OpenAPI 3.0.3，契約與本節一致 |
 
 - 本服務端點**只允許** `GET`／`POST`；其他方法（`PUT`／`PATCH`／`DELETE`）一律回 `405 Method Not Allowed`，並帶 `Allow` header 標示允許的方法；未知路徑回 `404`。
 - `/health` 只做 `store.Ping`：成功回 JSON `{"status":"ok"}`，失敗先 `slog.Warn` 再回 `{"status":"unhealthy"}`。
@@ -317,6 +320,11 @@ type WebhookBuffer struct {
 - 此限制只針對本服務提供的端點；呼叫 Xero API 照 Xero 要求（例如註冊 webhook 是 `PUT /webhooks`）。
 - 路由只做參數解析／驗證／回狀態碼，業務邏輯一律轉 `pkg/sync`。
 - **部署邊界**：`/admin/sync` 無內建認證，只可部署於私有網路或反向代理後方（限制來源 IP 或加鑑層），不得直接暴露公網。
+- 頁面路由（`/`、`/docs`、`/openapi.json`）一律只允許 `GET`，其他方法回 `405 Method Not Allowed` 並帶 `Allow: GET`。
+- `GET /` 是 `ServeMux` 的 catch-all，handler 必須以 `r.URL.Path == "/"` 精確判斷；其餘未知路徑回 `404`，不得回介紹頁。
+- 三個頁面路由由 `pkg/handler/page.go` 的 `PageHandler` 提供，資產以 `//go:embed`（`pkg/handler/home.html`、`docs.html`、`openapi.json`）打包進 binary，**不新增 Go 依賴**。
+- `PageHandler` 先判斷方法再判斷路徑，故未註冊路徑的非 `GET` 請求回 `405`，`GET` 未註冊路徑回 `404`。
+- Tailwind v4（`@tailwindcss/browser@4`）與 Swagger UI（`swagger-ui-dist@5`）皆以 jsDelivr CDN 載入：內網無外網時頁面只缺樣式／工具，`/openapi.json` 與既有 API 端點不受影響；頁面本身不含認證。
 
 ## 8. 環境變數
 

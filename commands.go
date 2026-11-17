@@ -155,6 +155,7 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx con
 		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey), buf),
 		handler.NewHealthHandler(st),
 		handler.NewAdminHandler(runner, st),
+		handler.NewPageHandler(),
 	)
 	// SkipIfStillRunning：上一輪同步還在跑時跳過本輪，避免長同步與下一輪 cron 重疊。
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
