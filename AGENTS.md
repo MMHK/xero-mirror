@@ -14,9 +14,9 @@
 - **技術棧**：Go 1.24+、MySQL、`database/sql`（手寫 SQL，不用 ORM / codegen）、stdlib `log/slog`、`net/http`
 - **架構**：單一 binary（root `main.go` + subcommand dispatch），業務模組放 `pkg/`
 
-### 目前狀態：scaffold only
+### 目前狀態：建置中（任務 1–8 完成，任務 9 進行中）
 
-repo 目前只有 `LICENSE`、`.gitignore` 與本文件，**尚未有 `go.mod` 或任何程式碼**。以下結構與指令是專案約定，不是現況；動手前先確認檔案是否真的存在。
+repo 已有完整 scaffold、migration、store、xero client、sync 核心、webhook handler 基礎。本機 dev 環境用 `docker compose up -d` 啟動 MySQL 8.4（port 3307）。詳見 `doc/dev-setup.md` 與 `doc/plans/2026-11-16-bootstrap.md`。
 
 可參考的同機專案（唯讀，不要修改）：`F:\TestProject\golang\xero-cli` — 已有可運作的 Xero OAuth2 與 Accounting API client（`auth.go`、`api.go`、`types.go`、`api_test.go`），抄邏輯時注意本文件對「服務 vs CLI」的差異。
 
@@ -52,11 +52,14 @@ repo 目前只有 `LICENSE`、`.gitignore` 與本文件，**尚未有 `go.mod` �
 │   │   └── migrations/  # 內嵌 DDL（NNN_name.up.sql / NNN_name.down.sql，經 //go:embed 打包）
 │   ├── sync/            # 實體同步編排：cursor、月度視窗、冪等 upsert
 │   └── handler/         # webhook 接收、health、admin 手動觸發
+├── scripts/             # Docker 初始化腳本（init-dev.sql 等）
 ├── tests/               # 測試工具（TestLogger、DB fixture、mock client）
 ├── doc/
 │   ├── spec.md          # 架構與規格（必讀）
+│   ├── dev-setup.md     # 本機開發環境設定
 │   ├── modules/         # 各模組設計
 │   └── plans/           # 實作計畫
+├── docker-compose.yml   # 本機 dev MySQL（port 3307）
 ├── .env.example
 └── go.mod
 ```
@@ -205,6 +208,12 @@ repo 目前只有 `LICENSE`、`.gitignore` 與本文件，**尚未有 `go.mod` �
 ## 10. 指令（scaffold 建立後適用）
 
 ```bash
+# 本機 dev 環境
+docker compose up -d                   # 啟動 MySQL（port 3307）
+docker compose down                    # 停止（保留資料）
+docker compose down -v                 # 停止並清除資料
+
+# Go 指令
 go build -o xero-mirror.exe .          # 唯一 binary
 go run . sync --month 2026-05          # 回補/重跑單月
 go run . sync                          # 依 cursor 增量
@@ -214,6 +223,7 @@ go test ./...                          # 全套
 go test ./pkg/sync -run TestCursor -v  # 單一模組 / 單一測試
 ```
 
+- **本機 dev 流程**：`docker compose up -d` → `cp .env.example .env`（填入 Xero 憑證）→ `go run . auth` → `go run . serve`
 - migration 已 `//go:embed` 進 binary：`sync`／`serve`／`auth` 啟動連上 MySQL 後自動套用，不需要手動 `mysql < 檔案`。
 - 順序：改 `pkg/store/migrations/*.sql` → `go build` → 跑任一 subcommand 觸發 migrate → `go test`。
 - 回滾：人工執行對應 `.down.sql`，並刪掉 `schema_migrations` 裡該版本那一列。
