@@ -60,6 +60,7 @@ repo 已有完整 scaffold、migration、store、xero client、sync 核心、web
 │   ├── modules/         # 各模組設計
 │   └── plans/           # 實作計畫
 ├── docker-compose.yml   # 本機 dev MySQL（port 3307）
+├── README.md            # 專案入口（使用者指定，快速啟動／指令／環境變數）
 ├── .env.example
 └── go.mod
 ```

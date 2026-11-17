@@ -48,6 +48,7 @@
 │   └── plans/            # 實作計畫
 ├── docker-compose.yml        # 本機 dev MySQL 8.4（host port 3307）
 ├── docker-compose.test.yml   # 測試 MySQL（host port 13315，拋棄式、無 volume）
+├── README.md                 # 專案入口：快速啟動、指令、環境變數（使用者指定）
 ├── .env.example
 └── go.mod
 ```
@@ -57,7 +58,7 @@
 - `pkg/` 底下**只允許** `config`、`xero`、`store`、`sync`、`handler` 五個模組，不新增第六個；新檔案優先放進既有模組，不要塞 root。
 - root 只允許 `main.go` 與 `commands.go`。`main.go` 的 ≤80 行只約束入口檔；subcommand 實作放 `commands.go`，且只做接線（config → DB → 呼叫 `pkg/`），業務邏輯一律在 `pkg/`。
 - **禁止目錄**：`internal/`、`domain/`、`application/`、`infrastructure/`、`adapter/`、`lib/`、`common/`、`layers/`、`features/`、`cmd/`。
-- subcommand 用 stdlib `flag` + `switch`，**禁** cobra／viper；文件只放 `doc/`，**禁** `docs/`、`README` 新版、`architecture.md`。
+- subcommand 用 stdlib `flag` + `switch`，**禁** cobra／viper；文件只放 `doc/`（root `README.md` 為使用者要求的專案入口，不在此限），**禁** `docs/`、`architecture.md`、其他 README。
 - `store` 是**唯一**碰 SQL 的層；`handler` 不寫同步邏輯，一律轉呼叫 `pkg/sync`。
 - `pkg/store/migrations/*.sql` 以 `//go:embed all:migrations` 內嵌；`go:embed` 屬 stdlib，**不需新增依賴**，也不引入 migration 工具。
 
