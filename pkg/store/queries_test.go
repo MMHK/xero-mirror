@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmhk/xero-mirror/tests"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +19,8 @@ func openTestStore(t *testing.T) *Store {
 	if dsn == "" {
 		t.Skip("未設定 TEST_MYSQL_DSN")
 	}
-	requireTestDatabase(t, dsn)
+	tests.RequireTestDatabase(t, dsn)
+	tests.LockTestDatabase(t, dsn)
 	cleaner, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
 	dropAllTables(t, cleaner)

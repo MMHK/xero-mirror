@@ -18,6 +18,14 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// Ping 檢查資料庫連線是否可用，供 /health 健康檢查使用。
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping 資料庫: %w", err)
+	}
+	return nil
+}
+
 // WithTx 在單一交易內執行 fn：fn 回錯或 Commit 失敗都 Rollback。
 // 供同步編排把實體 upsert 與 sync_state 水位放進同一個交易。
 func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {

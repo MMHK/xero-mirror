@@ -34,6 +34,13 @@ SELECT tenant_id, tenant_name, access_token_enc, refresh_token_enc, token_expiry
 	scopes, auth_status, created_at, updated_at
 FROM xero_tenants WHERE tenant_id = ?`
 
+const listTenantsSQL = `
+SELECT tenant_id, tenant_name, access_token_enc, refresh_token_enc, token_expiry,
+	scopes, auth_status, created_at, updated_at
+FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id`
+
+const deleteTenantSQL = `DELETE FROM xero_tenants WHERE tenant_id = ?`
+
 // upsertSyncStateSQL 保護既有水位：cursor 不得被 NULL 清空，也不得被較舊的值覆蓋。
 // GREATEST 遇 NULL 會回 NULL，因此先以 IF 判 NULL 再取較大值；
 // 既有為 NULL（如先跑月度回補）時直接採用新值，否則 GREATEST 仍會回 NULL 而永遠寫不進水位。
@@ -74,6 +81,17 @@ const selectPendingSyncJobsSQL = `
 SELECT id, tenant_id, entity, xero_id, reason, status, created_at, finished_at
 FROM sync_jobs WHERE status = 'pending'
 ORDER BY created_at, id LIMIT ?`
+
+const selectPendingSyncJobsByTenantSQL = `
+SELECT id, tenant_id, entity, xero_id, reason, status, created_at, finished_at
+FROM sync_jobs WHERE status = 'pending' AND tenant_id = ?
+ORDER BY created_at, id LIMIT ?`
+
+const countWebhookEventsByTenantSQL = `
+SELECT COUNT(*) FROM webhook_events WHERE tenant_id = ?`
+
+const countInvoicesByTenantSQL = `
+SELECT COUNT(*) FROM xero_invoices WHERE tenant_id = ?`
 
 const markSyncJobDoneSQL = `
 UPDATE sync_jobs SET status = 'done', finished_at = ? WHERE id = ?`
@@ -211,6 +229,39 @@ func (s *Store) GetTenant(ctx context.Context, tenantID string) (Tenant, error) 
 	return t, nil
 }
 
+// ListTenants 列出 auth_status = 'active' 的 tenant（依 tenant_id 排序）；auth_required 需重新
+// 授權才會再入列。無資料回空 slice，供 cron 與整 tenant 同步使用。
+func (s *Store) ListTenants(ctx context.Context) ([]Tenant, error) {
+	rows, err := s.db.QueryContext(ctx, listTenantsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("查詢 tenant 清單: %w", err)
+	}
+	defer rows.Close()
+
+	tenants := make([]Tenant, 0)
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(
+			&t.TenantID, &t.TenantName, &t.AccessTokenEnc, &t.RefreshTokenEnc, &t.TokenExpiry,
+			&t.Scopes, &t.AuthStatus, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("讀取 tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("讀取 tenant 清單: %w", err)
+	}
+	return tenants, nil
+}
+
+// DeleteTenant 刪除指定 tenant；供測試清理使用，tenant 不存在不算錯誤。
+func (s *Store) DeleteTenant(ctx context.Context, tenantID string) error {
+	if _, err := s.db.ExecContext(ctx, deleteTenantSQL, tenantID); err != nil {
+		return fmt.Errorf("刪除 tenant %s: %w", tenantID, err)
+	}
+	return nil
+}
+
 // UpsertSyncState 寫入同步水位；呼叫端負責與資料 upsert 放同一交易。
 func (s *Store) UpsertSyncState(ctx context.Context, tx *sql.Tx, st SyncState) error {
 	_, err := tx.ExecContext(ctx, upsertSyncStateSQL,
@@ -336,6 +387,51 @@ func (s *Store) GetPendingSyncJobs(ctx context.Context, limit int) ([]SyncJob, e
 		return nil, fmt.Errorf("讀取 sync_job: %w", err)
 	}
 	return jobs, nil
+}
+
+// GetPendingSyncJobsByTenant 取出指定 tenant 的待處理 job（依建立時間排序）；
+// limit <= 0 時採預設上限 100。
+func (s *Store) GetPendingSyncJobsByTenant(ctx context.Context, tenantID string, limit int) ([]SyncJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, selectPendingSyncJobsByTenantSQL, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查詢 tenant %s 的待處理 sync_jobs: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	jobs := make([]SyncJob, 0, limit)
+	for rows.Next() {
+		var j SyncJob
+		if err := rows.Scan(&j.ID, &j.TenantID, &j.Entity, &j.XeroID,
+			&j.Reason, &j.Status, &j.CreatedAt, &j.FinishedAt); err != nil {
+			return nil, fmt.Errorf("讀取 sync_job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("讀取 sync_job: %w", err)
+	}
+	return jobs, nil
+}
+
+// CountWebhookEventsByTenant 回傳指定 tenant 已記錄的 webhook 事件筆數。
+func (s *Store) CountWebhookEventsByTenant(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, countWebhookEventsByTenantSQL, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("統計 tenant %s 的 webhook_events: %w", tenantID, err)
+	}
+	return n, nil
+}
+
+// CountInvoicesByTenant 回傳指定 tenant 已寫入的 invoice 筆數，供同步測試確認寫入結果。
+func (s *Store) CountInvoicesByTenant(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, countInvoicesByTenantSQL, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("統計 tenant %s 的 xero_invoices: %w", tenantID, err)
+	}
+	return n, nil
 }
 
 // MarkSyncJobDone 把 job 標為 done 並記錄完成時間。

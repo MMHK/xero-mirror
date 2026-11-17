@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -14,6 +15,10 @@ import (
 const (
 	// DefaultDailyCallLimit 是 XERO_DAILY_CALL_LIMIT 未設定時，每 tenant 的每日呼叫上限。
 	DefaultDailyCallLimit = 1000
+	// DefaultWebhookBufferSize 是 WEBHOOK_BUFFER_SIZE 未設定時的單群組 batch size。
+	DefaultWebhookBufferSize = 30
+	// DefaultWebhookBufferDelayMs 是 WEBHOOK_BUFFER_DELAY 未設定時的 flush delay（毫秒）。
+	DefaultWebhookBufferDelayMs = 3000
 	// redirectPortMin、redirectPortMax 是 localhost callback 允許的 port 範圍。
 	redirectPortMin = 3000
 	redirectPortMax = 9000
@@ -42,6 +47,10 @@ type Config struct {
 	SyncCron       string
 	HTTPAddr       string
 	DailyCallLimit int
+	// WebhookBufferSize 是單一 (tenant, entity) 群組累積達此筆數即立即 flush。
+	WebhookBufferSize int
+	// WebhookBufferDelay 是收到首筆事件後的最長等待時間，到期即 flush。
+	WebhookBufferDelay time.Duration
 }
 
 // Load 讀取並驗證設定；.env 存在才載入，不存在則直接使用環境變數。
@@ -73,17 +82,27 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	bufferSize, err := parseWebhookBufferSize(os.Getenv("WEBHOOK_BUFFER_SIZE"))
+	if err != nil {
+		return nil, err
+	}
+	bufferDelayMs, err := parseWebhookBufferDelay(os.Getenv("WEBHOOK_BUFFER_DELAY"))
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
-		ClientID:       env["XERO_CLIENT_ID"],
-		ClientSecret:   env["XERO_CLIENT_SECRET"],
-		RedirectURI:    env["XERO_REDIRECT_URI"],
-		WebhookKey:     env["XERO_WEBHOOK_KEY"],
-		TokenEncKey:    key,
-		MySQLDSN:       env["MYSQL_DSN"],
-		SyncCron:       env["SYNC_CRON"],
-		HTTPAddr:       env["HTTP_ADDR"],
-		DailyCallLimit: limit,
+		ClientID:           env["XERO_CLIENT_ID"],
+		ClientSecret:       env["XERO_CLIENT_SECRET"],
+		RedirectURI:        env["XERO_REDIRECT_URI"],
+		WebhookKey:         env["XERO_WEBHOOK_KEY"],
+		TokenEncKey:        key,
+		MySQLDSN:           env["MYSQL_DSN"],
+		SyncCron:           env["SYNC_CRON"],
+		HTTPAddr:           env["HTTP_ADDR"],
+		DailyCallLimit:     limit,
+		WebhookBufferSize:  bufferSize,
+		WebhookBufferDelay: time.Duration(bufferDelayMs) * time.Millisecond,
 	}, nil
 }
 
@@ -151,6 +170,30 @@ func parseDailyCallLimit(raw string) (int, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("XERO_DAILY_CALL_LIMIT 必須是正整數（目前 %q）", raw)
+	}
+	return n, nil
+}
+
+// parseWebhookBufferSize 未設定時回預設值；有值則必須是正整數。
+func parseWebhookBufferSize(raw string) (int, error) {
+	if raw == "" {
+		return DefaultWebhookBufferSize, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("WEBHOOK_BUFFER_SIZE 必須是正整數（目前 %q）", raw)
+	}
+	return n, nil
+}
+
+// parseWebhookBufferDelay 未設定時回預設毫秒數；有值則必須是正整數毫秒。
+func parseWebhookBufferDelay(raw string) (int, error) {
+	if raw == "" {
+		return DefaultWebhookBufferDelayMs, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("WEBHOOK_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
 	}
 	return n, nil
 }

@@ -11,12 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/mmhk/xero-mirror/pkg/store"
+	"github.com/mmhk/xero-mirror/tests"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,12 +30,26 @@ func sign(body []byte, key string) string {
 }
 
 // webhookBody 組出一份帶一筆 INVOICE 與一筆被略過的 SUBSCRIPTION 的 payload。
+// resourceId 由 tenantID 衍生：event_id 去重鍵不含 tenant，固定 resourceId 會在重跑時撞鍵。
 func webhookBody(seq int, tenantID string) []byte {
+	resourceID := "inv-" + tenantID
 	return []byte(fmt.Sprintf(`{"lastEventSequence":%d,"entropy":"e","events":[`+
-		`{"tenantId":"%s","tenantType":"ORGANISATION","resourceUrl":"https://api.xero.com/api.xro/2.0/Invoices/inv-1",`+
-		`"resourceId":"inv-1","eventDateUtc":"2025-12-02T00:44:09.923","eventType":"UPDATE","eventCategory":"INVOICE"},`+
+		`{"tenantId":"%s","tenantType":"ORGANISATION","resourceUrl":"https://api.xero.com/api.xro/2.0/Invoices/%s",`+
+		`"resourceId":"%s","eventDateUtc":"2025-12-02T00:44:09.923","eventType":"UPDATE","eventCategory":"INVOICE"},`+
 		`{"tenantId":"%s","resourceId":"sub-1","eventDateUtc":"2025-12-02T00:44:09.923",`+
-		`"eventType":"UPDATE","eventCategory":"SUBSCRIPTION"}]}`, seq, tenantID, tenantID))
+		`"eventType":"UPDATE","eventCategory":"SUBSCRIPTION"}]}`, seq, tenantID, resourceID, resourceID, tenantID))
+}
+
+// webhookBodyTwoDates 組出同一 batch 內同 resourceId、不同 eventDateUtc 的兩筆 INVOICE。
+// resourceId 同樣由 tenantID 衍生，避免跨測試執行撞 event_id 去重鍵。
+func webhookBodyTwoDates(tenantID string) []byte {
+	resourceID := "inv-" + tenantID
+	return []byte(fmt.Sprintf(`{"lastEventSequence":9,"entropy":"e","events":[`+
+		`{"tenantId":"%s","resourceType":"INVOICE","resourceId":"%s",`+
+		`"eventDateUtc":"2025-12-02T00:44:09.923","eventType":"UPDATE","eventCategory":"INVOICE"},`+
+		`{"tenantId":"%s","resourceType":"INVOICE","resourceId":"%s",`+
+		`"eventDateUtc":"2025-12-02T00:45:10.001","eventType":"UPDATE","eventCategory":"INVOICE"}]}`,
+		tenantID, resourceID, tenantID, resourceID))
 }
 
 // sendWebhook 以指定簽章送出 POST /webhook 並回傳 recorder。
@@ -55,10 +68,8 @@ func openHandlerStore(t *testing.T) *store.Store {
 	if dsn == "" {
 		t.Skip("未設定 TEST_MYSQL_DSN")
 	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil || !strings.Contains(cfg.DBName, "_test") {
-		t.Skip("TEST_MYSQL_DSN 未指向測試庫")
-	}
+	tests.RequireTestDatabase(t, dsn)
+	tests.LockTestDatabase(t, dsn)
 	db, err := store.OpenMigrated(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -66,7 +77,7 @@ func openHandlerStore(t *testing.T) *store.Store {
 }
 
 func TestHandleRejectsBadSignature(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey))
+	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil)
 	body := webhookBody(1, "t1")
 
 	rec := sendWebhook(h, body, "not-a-valid-signature")
@@ -75,7 +86,7 @@ func TestHandleRejectsBadSignature(t *testing.T) {
 }
 
 func TestHandleRejectsNonPost(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey))
+	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil)
 	req := httptest.NewRequest(http.MethodGet, "/webhook", nil)
 	rec := httptest.NewRecorder()
 	h.Handle(rec, req)
@@ -83,7 +94,7 @@ func TestHandleRejectsNonPost(t *testing.T) {
 }
 
 func TestHandleRejectsInvalidJSON(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey))
+	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil)
 	body := []byte("this is not json")
 
 	rec := sendWebhook(h, body, sign(body, testWebhookKey))
@@ -93,22 +104,38 @@ func TestHandleRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleEnqueuesOncePerEvent(t *testing.T) {
 	s := openHandlerStore(t)
-	tenantID := "handler-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	body := webhookBody(7, tenantID)
-	h := NewWebhookHandler(s, []byte(testWebhookKey))
+	h := NewWebhookHandler(s, []byte(testWebhookKey), nil)
+	ctx := context.Background()
 
-	require.Equal(t, http.StatusOK, sendWebhook(h, body, sign(body, testWebhookKey)).Code)
-	require.Equal(t, http.StatusOK, sendWebhook(h, body, sign(body, testWebhookKey)).Code)
+	t.Run("重送同一 payload 只入列一次", func(t *testing.T) {
+		tenantID := "handler-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		body := webhookBody(7, tenantID)
 
-	jobs, err := s.GetPendingSyncJobs(context.Background(), 100)
-	require.NoError(t, err)
-	var matched []store.SyncJob
-	for _, j := range jobs {
-		if j.TenantID == tenantID {
-			matched = append(matched, j)
-		}
-	}
-	require.Len(t, matched, 1, "重複事件不得重複入列")
-	require.Equal(t, "INVOICES", matched[0].Entity)
-	require.Equal(t, "webhook:UPDATE", matched[0].Reason)
+		require.Equal(t, http.StatusOK, sendWebhook(h, body, sign(body, testWebhookKey)).Code)
+		require.Equal(t, http.StatusOK, sendWebhook(h, body, sign(body, testWebhookKey)).Code)
+
+		jobs, err := s.GetPendingSyncJobsByTenant(ctx, tenantID, 10)
+		require.NoError(t, err)
+		require.Len(t, jobs, 1, "重複事件不得重複入列")
+		require.Equal(t, "INVOICES", jobs[0].Entity)
+		require.Equal(t, "webhook:UPDATE", jobs[0].Reason)
+
+		events, err := s.CountWebhookEventsByTenant(ctx, tenantID)
+		require.NoError(t, err)
+		require.Equal(t, 1, events, "重複事件不得重複寫入")
+	})
+
+	t.Run("同 batch 同 resourceId 不同 eventDate 仍各自記錄", func(t *testing.T) {
+		tenantID := "handler-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		body := webhookBodyTwoDates(tenantID)
+
+		require.Equal(t, http.StatusOK, sendWebhook(h, body, sign(body, testWebhookKey)).Code)
+
+		jobs, err := s.GetPendingSyncJobsByTenant(ctx, tenantID, 10)
+		require.NoError(t, err)
+		require.Len(t, jobs, 1, "同資源只入列一個 job")
+		events, err := s.CountWebhookEventsByTenant(ctx, tenantID)
+		require.NoError(t, err)
+		require.Equal(t, 2, events, "不同 eventDate 視為不同事件")
+	})
 }

@@ -35,6 +35,13 @@ var webhookEntity = map[string]string{
 	"PAYMENT":    string(pkgsync.EntityPayments),
 }
 
+// webhookEventTypes 是支援的 eventType；未列出者改記 webhook:unknown 但仍入列。
+var webhookEventTypes = map[string]struct{}{
+	"CREATE": {},
+	"UPDATE": {},
+	"DELETE": {},
+}
+
 // webhookPayload 是 Xero webhook payload；JSON tag 照 Xero 原樣 camelCase。
 type webhookPayload struct {
 	FirstEventSequence int            `json:"firstEventSequence"`
@@ -67,16 +74,19 @@ type webhookTarget struct {
 type WebhookHandler struct {
 	store      *store.Store
 	signingKey []byte
+	buffer     *WebhookBuffer
 }
 
-// NewWebhookHandler 建立 webhook handler；signingKey 為 Xero webhook signing key。
-func NewWebhookHandler(s *store.Store, signingKey []byte) *WebhookHandler {
-	return &WebhookHandler{store: s, signingKey: signingKey}
+// NewWebhookHandler 建立 webhook handler；signingKey 為 Xero webhook signing key，
+// buf 可為 nil（不啟用 buffer 聚合，事件僅入列 sync_jobs 交由 cron 處理）。
+func NewWebhookHandler(s *store.Store, signingKey []byte, buf *WebhookBuffer) *WebhookHandler {
+	return &WebhookHandler{store: s, signingKey: signingKey, buffer: buf}
 }
 
 // Handle 依 Xero 規則回應：非 POST 405、驗簽失敗 401、body 不合法 400、成功 200。
 func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -102,12 +112,24 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if err := h.enqueue(r.Context(), p.LastEventSequence, targets, time.Now().UTC()); err != nil {
+	if err := h.enqueue(r.Context(), targets, time.Now().UTC()); err != nil {
+		// 刻意回 500 讓 Xero 重送，避免事件遺失；屬 spec §7「先回 200」的明文例外。
 		slog.Error("webhook 入列失敗", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	h.dispatchToBuffer(targets)
 	w.WriteHeader(http.StatusOK)
+}
+
+// dispatchToBuffer 把已入列事件派送給 buffer 聚合；未啟用 buffer（nil）時直接略過。
+func (h *WebhookHandler) dispatchToBuffer(targets []webhookTarget) {
+	if h.buffer == nil {
+		return
+	}
+	for _, t := range targets {
+		h.buffer.Add(t.tenantID, pkgsync.Entity(t.entity), t.xeroID)
+	}
 }
 
 // readBody 讀取 raw body；超過上限視為 body 不合法（驗簽前不得丟棄 raw bytes）。
@@ -130,36 +152,53 @@ func (h *WebhookHandler) verifySignature(raw []byte, signature string) bool {
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
-// parseTargets 略過未知 entity 並解析事件時間；時間格式錯誤直接回錯（對應 400）。
+// parseTargets 略過缺 tenantId／resourceId 與未支援分類的事件，並統計略過筆數；
+// eventDateUtc 任一不合法直接回錯，呼叫端據此整批回 400。
 func parseTargets(p webhookPayload) ([]webhookTarget, error) {
 	targets := make([]webhookTarget, 0, len(p.Events))
+	skipped := 0
 	for _, e := range p.Events {
 		entity, ok := webhookEntity[e.EventCategory]
 		if !ok {
+			skipped++
+			continue
+		}
+		if e.TenantID == "" || e.ResourceID == "" {
+			slog.Warn("webhook 事件缺少 tenantId 或 resourceId，已略過",
+				"category", e.EventCategory, "resource", e.ResourceID)
 			continue
 		}
 		d, err := time.Parse(eventDateLayout, e.EventDateUTC)
 		if err != nil {
 			return nil, fmt.Errorf("解析 webhook eventDateUtc %q: %w", e.EventDateUTC, err)
 		}
+		eventType := e.EventType
+		if _, ok := webhookEventTypes[eventType]; !ok {
+			slog.Warn("webhook 未知 eventType，改記 webhook:unknown",
+				"event_type", e.EventType, "resource", e.ResourceID)
+			eventType = "unknown"
+		}
 		targets = append(targets, webhookTarget{
 			tenantID:  e.TenantID,
 			entity:    entity,
 			xeroID:    e.ResourceID,
 			eventDate: d.UTC(),
-			eventType: e.EventType,
+			eventType: eventType,
 		})
+	}
+	if skipped > 0 {
+		slog.Info("略過未支援的 webhook 分類", "count", skipped)
 	}
 	return targets, nil
 }
 
 // enqueue 在同一個交易內逐筆去重寫入 webhook_events，非重複才入列 sync_jobs。
-func (h *WebhookHandler) enqueue(ctx context.Context, seq int, targets []webhookTarget, now time.Time) error {
+func (h *WebhookHandler) enqueue(ctx context.Context, targets []webhookTarget, now time.Time) error {
 	return h.store.WithTx(ctx, func(tx *sql.Tx) error {
 		for _, t := range targets {
 			date := t.eventDate
 			dup, err := h.store.InsertWebhookEvent(ctx, tx, store.WebhookEvent{
-				EventID:    eventID(seq, t.xeroID),
+				EventID:    eventID(t.xeroID, date),
 				TenantID:   t.tenantID,
 				Entity:     t.entity,
 				XeroID:     t.xeroID,
@@ -186,8 +225,9 @@ func (h *WebhookHandler) enqueue(ctx context.Context, seq int, targets []webhook
 	})
 }
 
-// eventID 以 lastEventSequence 與 resourceId 組合去重：Xero 官方 event 沒有 eventId 欄位，
-// 同一事件重送時 seq 與 resourceId 相同，藉此達到去重（取捨：batch 內不同事件共用 seq）。
-func eventID(seq int, xeroID string) string {
-	return strconv.Itoa(seq) + "_" + xeroID
+// eventID 以 resourceId + eventDate（毫秒）組合去重：Xero event 沒有 eventId 欄位，
+// 重送時兩者相同仍可去重；seq 會重置且同 batch 共用，不適合當鍵。
+// 跨 tenant 不加 tenant 維度：resourceId 為 Xero GUID，全域唯一。
+func eventID(xeroID string, eventDate time.Time) string {
+	return xeroID + "_" + strconv.FormatInt(eventDate.UnixMilli(), 10)
 }

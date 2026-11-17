@@ -1,0 +1,15 @@
+# xero-mirror 測試用 MySQL（拋棄式，不需 volume）
+# 啟動：docker compose -f docker-compose.test.yml up -d
+# 停止：docker compose -f docker-compose.test.yml down
+# 連線：mysql -h 127.0.0.1 -P 13315 -u root -proot xero_mirror_test
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: xero-mirror-test-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: xero_mirror_test
+    ports:
+      - "13315:3306"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]

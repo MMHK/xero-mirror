@@ -4,11 +4,14 @@ package sync
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/mmhk/xero-mirror/pkg/store"
@@ -63,6 +66,23 @@ var entitySpecs = map[Entity]entitySpec{
 	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: false, monthFilter: false, supportsBatchIDs: false},
 }
 
+// Entities 回傳固定順序的五個同步實體；cron 與整 tenant 編排都照此順序執行。
+func Entities() []Entity {
+	return []Entity{
+		EntityInvoices,
+		EntityCreditNotes,
+		EntityPayments,
+		EntityContacts,
+		EntityAccounts,
+	}
+}
+
+// SupportsBatchIDs 回傳實體端點是否支援 ?IDs= 批量查詢；未知實體回 false。
+func SupportsBatchIDs(e Entity) bool {
+	spec, ok := entitySpecs[e]
+	return ok && spec.supportsBatchIDs
+}
+
 // Run 依 Window 抓取單一 entity：所有頁抓完、映射完成後只寫一次 DB。
 // 抓取過程不推進 cursor，避免中途失敗後用較新水位略過尚未抓到的資料。
 func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error {
@@ -99,6 +119,154 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 	}
 	slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", a.total)
 	return nil
+}
+
+// maxBatchIDs 是單批 ?IDs= 上限；Xero URL 長度約容納 40 個 ID，保守取 30。
+const maxBatchIDs = 30
+
+// RunBatch 以 ?IDs= 批量抓取指定 entry；只支援 supportsBatchIDs 的端點。
+// webhook 觸發不得推進 cursor（trackCursor=false），全部批次成功後才一次寫入。
+func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error {
+	spec, ok := entitySpecs[entity]
+	if !ok {
+		return fmt.Errorf("批量同步 %s: 未知的實體", entity)
+	}
+	if !spec.supportsBatchIDs {
+		return fmt.Errorf("批量同步 %s: 端點不支援批量 IDs", entity)
+	}
+	unique := dedupIDs(ids)
+	if len(unique) == 0 {
+		return nil
+	}
+	a := &pageApplier{
+		tenantID: tenantID, entity: entity,
+		syncedAt: time.Now().UTC(), trackCursor: false,
+	}
+	a.batch.TenantID = tenantID
+	for _, chunk := range chunkIDs(unique, maxBatchIDs) {
+		query := url.Values{}
+		query.Set("IDs", strings.Join(chunk, ","))
+		if err := r.client.GetPages(ctx, tenantID, spec.path, query, nil, a.handle); err != nil {
+			return fmt.Errorf("批量同步 %s: %w", entity, err)
+		}
+	}
+	if a.total > 0 {
+		a.batch.Entity = string(entity)
+		if err := r.store.ApplyBatch(ctx, a.batch); err != nil {
+			return fmt.Errorf("批量同步 %s: %w", entity, err)
+		}
+	}
+	slog.Info("批量同步完成", "tenant", tenantID, "entity", entity, "ids", len(ids), "count", a.total)
+	return nil
+}
+
+// RunIncremental 讀 sync_state 水位後跑單一實體增量；無紀錄（sql.ErrNoRows）視為首跑全量。
+func (r *Runner) RunIncremental(ctx context.Context, tenantID string, entity Entity) error {
+	st, err := r.store.GetSyncState(ctx, tenantID, string(entity))
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("讀取同步狀態 %s/%s: %w", tenantID, entity, err)
+	}
+	var cursor *time.Time
+	if err == nil {
+		cursor = st.CursorTime
+	}
+	return r.Run(ctx, tenantID, entity, Window{Cursor: cursor})
+}
+
+// RunTenant 依固定順序跑單一 tenant 的五個實體增量；單一實體失敗只 Warn 續跑，
+// 全部實體都失敗才回錯，部分成功回 nil（錯誤已記 log）。
+func (r *Runner) RunTenant(ctx context.Context, tenantID string) error {
+	slog.Info("開始 tenant 同步", "tenant", tenantID)
+	failed := 0
+	for _, entity := range Entities() {
+		if err := r.RunIncremental(ctx, tenantID, entity); err != nil {
+			failed++
+			slog.Warn("實體同步失敗，續跑其餘實體",
+				"tenant", tenantID, "entity", entity, "err", err)
+		}
+	}
+	if failed == len(Entities()) {
+		return fmt.Errorf("tenant %s 的全部 %d 個實體同步皆失敗", tenantID, failed)
+	}
+	slog.Info("tenant 同步結束", "tenant", tenantID, "failed", failed)
+	return nil
+}
+
+// RunAllIncremental 列出全部 tenant 並逐個跑五實體增量；單一 tenant 失敗只 Warn 續跑，
+// 回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
+func (r *Runner) RunAllIncremental(ctx context.Context) error {
+	tenants, err := r.store.ListTenants(ctx)
+	if err != nil {
+		return fmt.Errorf("讀取 tenant 清單: %w", err)
+	}
+	failed := 0
+	for _, t := range tenants {
+		if err := r.RunTenant(ctx, t.TenantID); err != nil {
+			failed++
+			slog.Warn("tenant 同步失敗，續跑下一個 tenant", "tenant", t.TenantID, "err", err)
+		}
+	}
+	slog.Info("全 tenant 增量同步結束", "tenants", len(tenants), "failed", failed)
+	if failed > 0 {
+		return fmt.Errorf("同步失敗 %d 個 tenant", failed)
+	}
+	return nil
+}
+
+// RunAllMonth 逐 tenant × Entities() 跑指定月度視窗（UTC 半開區間）；單一實體失敗只 Warn
+// 續跑，任一實體失敗即記該 tenant 失敗，回傳失敗 tenant 數組成的錯誤（全成功回 nil）。
+func (r *Runner) RunAllMonth(ctx context.Context, start, end time.Time) error {
+	tenants, err := r.store.ListTenants(ctx)
+	if err != nil {
+		return fmt.Errorf("讀取 tenant 清單: %w", err)
+	}
+	w := Window{MonthStart: &start, MonthEnd: &end}
+	failed := 0
+	for _, t := range tenants {
+		tenantFailed := false
+		for _, entity := range Entities() {
+			if err := r.Run(ctx, t.TenantID, entity, w); err != nil {
+				tenantFailed = true
+				slog.Warn("月度回補失敗，續跑其餘實體",
+					"tenant", t.TenantID, "entity", entity, "err", err)
+			}
+		}
+		if tenantFailed {
+			failed++
+		}
+	}
+	slog.Info("全 tenant 月度回補結束", "tenants", len(tenants), "failed", failed)
+	if failed > 0 {
+		return fmt.Errorf("同步失敗 %d 個 tenant", failed)
+	}
+	return nil
+}
+
+// dedupIDs 去除空字串與重複 ID，保留首次出現的順序。
+func dedupIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// chunkIDs 把 IDs 切成每批最多 size 個，維持原順序。
+func chunkIDs(ids []string, size int) [][]string {
+	var chunks [][]string
+	for i := 0; i < len(ids); i += size {
+		end := min(i+size, len(ids))
+		chunks = append(chunks, ids[i:end])
+	}
+	return chunks
 }
 
 // pageApplier 彙總一次 Run 的抓取結果；handle 符合 GetPages 的回呼簽名。

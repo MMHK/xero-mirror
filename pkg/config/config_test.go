@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +35,34 @@ func TestLoad(t *testing.T) {
 		{"DSN 開 clientFoundRows", func(t *testing.T) {
 			t.Setenv("MYSQL_DSN", "user:pass@tcp(127.0.0.1:3306)/xero_mirror?parseTime=true&clientFoundRows=true")
 		}, "不可開啟 clientFoundRows"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidEnv(t)
+			tc.apply(t)
+			_, err := Load()
+			require.Error(t, err)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestLoadWebhookBuffer(t *testing.T) {
+	t.Run("未設定採預設值", func(t *testing.T) {
+		setValidEnv(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, DefaultWebhookBufferSize, cfg.WebhookBufferSize)
+		require.Equal(t, DefaultWebhookBufferDelayMs*time.Millisecond, cfg.WebhookBufferDelay)
+	})
+
+	cases := []struct {
+		name    string
+		apply   func(t *testing.T)
+		wantErr string
+	}{
+		{"size 非法", func(t *testing.T) { t.Setenv("WEBHOOK_BUFFER_SIZE", "0") }, "WEBHOOK_BUFFER_SIZE 必須是正整數"},
+		{"delay 非法", func(t *testing.T) { t.Setenv("WEBHOOK_BUFFER_DELAY", "x") }, "WEBHOOK_BUFFER_DELAY 必須是正整數毫秒"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

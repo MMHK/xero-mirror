@@ -5,33 +5,21 @@ import (
 	"database/sql"
 	"io/fs"
 	"os"
-	"strings"
 	"testing"
 
-	"github.com/go-sql-driver/mysql"
+	"github.com/mmhk/xero-mirror/tests"
 	"github.com/stretchr/testify/require"
 )
-
-// requireTestDatabase 要求 TEST_MYSQL_DSN 指向名字含 _test 的庫，避免清理 helper 誤刪正式資料。
-func requireTestDatabase(t *testing.T, dsn string) {
-	t.Helper()
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Skipf("TEST_MYSQL_DSN 無法解析: %v", err)
-	}
-	if !strings.Contains(cfg.DBName, "_test") {
-		t.Skip("TEST_MYSQL_DSN 未指向測試庫")
-	}
-}
 
 func TestMigrateIdempotent(t *testing.T) {
 	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("未設定 TEST_MYSQL_DSN")
 	}
-	requireTestDatabase(t, dsn)
+	tests.RequireTestDatabase(t, dsn)
 	ctx := context.Background()
 
+	tests.LockTestDatabase(t, dsn)
 	cleaner, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
 	defer cleaner.Close()
