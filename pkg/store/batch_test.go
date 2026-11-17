@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -106,4 +107,33 @@ func TestUpsertSyncStateFillsNullCursor(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, st.CursorTime)
 	require.True(t, st.CursorTime.Equal(t1), "既有 cursor 為 NULL 時應直接採用新值")
+}
+
+// TestApplyBatchBulkChunks 驗證超過 bulkUpsertRows 的批次可跨塊寫入，
+// 重跑時走 ON DUPLICATE KEY UPDATE 更新既有列且不新增列。
+func TestApplyBatchBulkChunks(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	n := bulkUpsertRows + 1
+	contacts := make([]Contact, n)
+	for i := range contacts {
+		contacts[i] = Contact{TenantID: "t1", ContactID: fmt.Sprintf("c-%03d", i), SyncedAt: now}
+	}
+	// 不帶 cursor，只驗證多列 upsert 的切塊與更新語意。
+	b := Batch{TenantID: "t1", Entity: "CONTACT", Contacts: contacts}
+	require.NoError(t, s.ApplyBatch(ctx, b))
+	require.Equal(t, n, countRows(t, s, "xero_contacts"))
+
+	// 更新對象取第一塊內的索引 n/2，確保驗到同一句多列語句內逐列 VALUES 的更新語意。
+	idx := n / 2
+	name := "更新後名稱"
+	b.Contacts[idx].Name = &name
+	require.NoError(t, s.ApplyBatch(ctx, b))
+	require.Equal(t, n, countRows(t, s, "xero_contacts"))
+	var got string
+	require.NoError(t, s.db.QueryRowContext(ctx,
+		"SELECT name FROM xero_contacts WHERE tenant_id = ? AND contact_id = ?",
+		"t1", contacts[idx].ContactID).Scan(&got))
+	require.Equal(t, name, got, "重跑後應更新既有列的 name")
 }

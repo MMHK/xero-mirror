@@ -44,36 +44,27 @@ func (s *Store) ApplyBatch(ctx context.Context, b Batch) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("批次寫入完成", "tenant", b.TenantID, "entity", b.Entity, "count", n)
+	slog.Debug("批次寫入完成", "tenant", b.TenantID, "entity", b.Entity, "count", n)
 	return nil
 }
 
-// applyEntities 依序 upsert 五類實體，回傳寫入總筆數；失敗時回傳 0 與帶實體名的錯誤。
+// applyEntities 依序以多列 upsert 寫入五類實體，回傳寫入總筆數；
+// 失敗時回傳 0 與帶實體名的錯誤。
 func (s *Store) applyEntities(ctx context.Context, tx *sql.Tx, b Batch) (int, error) {
-	for i := range b.Contacts {
-		if err := s.UpsertContact(ctx, tx, b.Contacts[i]); err != nil {
-			return 0, fmt.Errorf("寫入 contact: %w", err)
-		}
+	if err := s.bulkUpsertContacts(ctx, tx, b.Contacts); err != nil {
+		return 0, fmt.Errorf("寫入 contact: %w", err)
 	}
-	for i := range b.Accounts {
-		if err := s.UpsertAccount(ctx, tx, b.Accounts[i]); err != nil {
-			return 0, fmt.Errorf("寫入 account: %w", err)
-		}
+	if err := s.bulkUpsertAccounts(ctx, tx, b.Accounts); err != nil {
+		return 0, fmt.Errorf("寫入 account: %w", err)
 	}
-	for i := range b.Invoices {
-		if err := s.UpsertInvoice(ctx, tx, b.Invoices[i]); err != nil {
-			return 0, fmt.Errorf("寫入 invoice: %w", err)
-		}
+	if err := s.bulkUpsertInvoices(ctx, tx, b.Invoices); err != nil {
+		return 0, fmt.Errorf("寫入 invoice: %w", err)
 	}
-	for i := range b.CreditNotes {
-		if err := s.UpsertCreditNote(ctx, tx, b.CreditNotes[i]); err != nil {
-			return 0, fmt.Errorf("寫入 credit_note: %w", err)
-		}
+	if err := s.bulkUpsertCreditNotes(ctx, tx, b.CreditNotes); err != nil {
+		return 0, fmt.Errorf("寫入 credit_note: %w", err)
 	}
-	for i := range b.Payments {
-		if err := s.UpsertPayment(ctx, tx, b.Payments[i]); err != nil {
-			return 0, fmt.Errorf("寫入 payment: %w", err)
-		}
+	if err := s.bulkUpsertPayments(ctx, tx, b.Payments); err != nil {
+		return 0, fmt.Errorf("寫入 payment: %w", err)
 	}
 	return len(b.Contacts) + len(b.Accounts) + len(b.Invoices) +
 		len(b.CreditNotes) + len(b.Payments), nil

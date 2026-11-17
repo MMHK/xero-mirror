@@ -308,7 +308,8 @@ func (s *Store) EnqueueSyncJob(ctx context.Context, tx *sql.Tx, j SyncJob) error
 	return nil
 }
 
-// UpsertContact 冪等寫入 contact，重複時更新全部非鍵欄位。
+// UpsertContact 冪等寫入 contact，重複時更新全部非鍵欄位；
+// production 由 bulk 版本使用，單列版本保留給單筆補寫／測試。
 func (s *Store) UpsertContact(ctx context.Context, tx *sql.Tx, c Contact) error {
 	_, err := tx.ExecContext(ctx, upsertContactSQL,
 		c.TenantID, c.ContactID, c.Name, c.Status, c.XeroUpdatedAt, c.SyncedAt)
@@ -318,7 +319,8 @@ func (s *Store) UpsertContact(ctx context.Context, tx *sql.Tx, c Contact) error 
 	return nil
 }
 
-// UpsertAccount 冪等寫入 account，重複時更新全部非鍵欄位。
+// UpsertAccount 冪等寫入 account，重複時更新全部非鍵欄位；
+// production 由 bulk 版本使用，單列版本保留給單筆補寫／測試。
 func (s *Store) UpsertAccount(ctx context.Context, tx *sql.Tx, a Account) error {
 	_, err := tx.ExecContext(ctx, upsertAccountSQL,
 		a.TenantID, a.AccountID, a.Code, a.Name, a.Type, a.Status, a.XeroUpdatedAt, a.SyncedAt)
@@ -329,6 +331,7 @@ func (s *Store) UpsertAccount(ctx context.Context, tx *sql.Tx, a Account) error 
 }
 
 // UpsertInvoice 冪等寫入 invoice；金額字串直接綁 DECIMAL。
+// production 由 bulk 版本使用，單列版本保留給單筆補寫／測試。
 func (s *Store) UpsertInvoice(ctx context.Context, tx *sql.Tx, inv Invoice) error {
 	_, err := tx.ExecContext(ctx, upsertInvoiceSQL,
 		inv.TenantID, inv.InvoiceID, inv.Type, inv.Number, inv.ContactID, inv.Status,
@@ -341,6 +344,7 @@ func (s *Store) UpsertInvoice(ctx context.Context, tx *sql.Tx, inv Invoice) erro
 }
 
 // UpsertCreditNote 冪等寫入 credit note；金額字串直接綁 DECIMAL。
+// production 由 bulk 版本使用，單列版本保留給單筆補寫／測試。
 func (s *Store) UpsertCreditNote(ctx context.Context, tx *sql.Tx, cn CreditNote) error {
 	_, err := tx.ExecContext(ctx, upsertCreditNoteSQL,
 		cn.TenantID, cn.CreditNoteID, cn.Type, cn.Number, cn.ContactID, cn.Status,
@@ -353,6 +357,7 @@ func (s *Store) UpsertCreditNote(ctx context.Context, tx *sql.Tx, cn CreditNote)
 }
 
 // UpsertPayment 冪等寫入 payment；金額字串直接綁 DECIMAL。
+// production 由 bulk 版本使用，單列版本保留給單筆補寫／測試。
 func (s *Store) UpsertPayment(ctx context.Context, tx *sql.Tx, p Payment) error {
 	_, err := tx.ExecContext(ctx, upsertPaymentSQL,
 		p.TenantID, p.PaymentID, p.InvoiceNumber, p.ContactID, amountOrZero(p.Amount), p.Date,
