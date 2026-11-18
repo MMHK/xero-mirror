@@ -1,0 +1,12 @@
+# Dockerfile.goreleaser — CI 建構用，binary 由 GoReleaser 預先編譯
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+COPY xero-mirror .
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/xero-mirror"]
+CMD ["serve"]

@@ -1,0 +1,45 @@
+# GoReleaser 設定 for xero-mirror
+# GoReleaser 只管 cross-compile + release，Docker 由 CI workflow 處理
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: xero-mirror
+    binary: xero-mirror
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge branch
+
+release:
+  disable: false
