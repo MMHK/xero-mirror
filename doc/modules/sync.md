@@ -2,7 +2,7 @@
 
 > 本文件說明 `pkg/sync` 的實作契約，對應 `doc/spec.md` §3（資料流）與 §9（指令／cron 語意）。端點能力以 spec §5 為準，本文件不重抄能力矩陣。
 
-**建立日期**: 2026-11-17 ｜ **狀態**: ✅ 已實作（任務 8、9b、13）
+**建立日期**: 2026-11-17 ｜ **狀態**: ✅ 已實作（任務 8、9b、13、cursor chunk save 優化）
 
 ## 1. 職責與邊界
 
@@ -46,24 +46,26 @@ type Runner struct { client *xero.Client; store *store.Store }
 ```
 Runner.Run
   ├─ 驗證：未知實體／視窗不合法 → 直接回錯
-  ├─ buildRequest：依 entitySpecs 決定 If-Modified-Since 與 where
+  ├─ buildRequest：依 entitySpecs 決定 If-Modified-Since、where 與 order
   ├─ xero.Client.GetPages（分頁端點）或 Get（Accounts）
   ├─ decodePage → pageApplier.handle：逐頁累積，達 writeChunkRows（500）即 flush
-  └─ total > 0 → 最後一次 flush 帶 cursor：五表 upsert + sync_state（同交易）
+  └─ total > 0 → 最後一次 flush 帶 cursor（-1 秒）：五表 upsert + sync_state（同交易）
 ```
 
-- 分塊寫入：`writeChunkRows = 500`，每頁累積後達門檻即 `flush(nil)`，以 `ApplyBatch` 單一交易寫入並清空待寫 slice；flush 失敗立即回錯且不清空（該批回滾）。
-- 中途失敗時，先前已 flush 的 chunk 留在 DB（短期部分更新可見），但 cursor 未動；`ON DUPLICATE KEY UPDATE` 冪等，重跑不會產生重複列。
-- 最後一次 flush 僅在 `total > 0` 時執行，並帶入本輪最大 `xero_updated_at`（`Cursor` 模式）或 `nil`（月度／batch）。中途剛好 flush 完、待寫 slice 為空時，只要 `maxAt` 有值（`Cursor` 模式）仍會寫入 cursor 更新 `sync_state`。
-- `ApplyBatch` 同一交易內先 upsert 五張實體表，再 upsert `sync_state`（`cursor_time`、`last_run_at`、`status = 'idle'`）；任一步失敗整批回滾。
-- 端點回空陣列（`total == 0`）時不呼叫 `ApplyBatch`，該輪 `last_run_at`／`status` 不會更新。
+- **分頁排序**：分頁端點（Contacts、Invoices、CreditNotes、Payments）請求時明確帶 `order=UpdatedDateUTC`，確保資料按時間排序，chunk save 安全。Accounts 不分頁，不需要排序。
+- **分塊寫入**：`writeChunkRows = 500`，每頁累積後達門檻即 `flush(cursor, false)`（中間 flush），cursor 為 `maxAt - 1 秒`；以 `ApplyBatch` 單一交易寫入並清空待寫 slice；flush 失敗立即回錯且不清空（該批回滾）。
+- **中間 flush 的 cursor 更新**：中間 flush 帶 cursor（`maxAt - 1 秒`），`ApplyBatch` 只更新 `cursor_time`，不更新 `status` 和 `last_run_at`（避免提前把 status 設為 idle）。
+- **最終 flush**：`total > 0` 時執行最終 flush（`isFinal=true`），帶 cursor（`maxAt - 1 秒`），`ApplyBatch` 更新 `cursor_time`、`last_run_at`、`status = 'idle'`。
+- **-1 秒策略**：cursor 儲存時減 1 秒（`cursor.Add(-time.Second)`），下次增量從 `cursor - 1s` 開始抓取。可能會重複抓取部分資料，但冪等 upsert 會處理。這樣做是為了避免因為時間精度差異（HTTP header 精度到秒，Xero `UpdatedDateUTC` 精度到毫秒）而漏資料。
+- **空資料處理**：端點回空陣列（`total == 0`）時不呼叫 `ApplyBatch`，但會呼叫 `UpsertSyncStateWithoutTx` 更新 `status = 'idle'` 和 `last_run_at`，避免 status 永遠停留在 `'running'`。
+- 中途失敗時，先前已 flush 的 chunk 留在 DB（短期部分更新可見），cursor 已更新到最後一個成功的 chunk；`ON DUPLICATE KEY UPDATE` 冪等，重跑不會產生重複列。
 - `RunBatch` 先 `dedupIDs`（丟空字串、保首次出現順序），再以 `maxBatchIDs = 30` 分批；每批同樣分塊 flush，結束時再 flush 一次但不帶 cursor（不推進水位）。
 
 ## 4. cursor 規則
 
 | 觸發 | Window | `trackCursor` | 水位行為 |
 |------|--------|---------------|----------|
-| `sync`（無 `--month`）／cron | `Cursor`（`nil` = 首跑全量） | true | `Batch.Cursor` = 本批最大 `xero_updated_at` |
+| `sync`（無 `--month`）／cron | `Cursor`（`nil` = 首跑全量） | true | `Batch.Cursor` = 本批最大 `xero_updated_at` - 1 秒 |
 | `sync --month`／`POST /admin/sync?month=` | `MonthStart`／`MonthEnd`（UTC 半開） | false | `Batch.Cursor` 保持 `nil` |
 | webhook buffer flush | 批量 IDs | false | `Batch.Cursor` 保持 `nil` |
 
@@ -79,19 +81,39 @@ cursor_time = IF(
 
 - 月度與 batch 送 `cursor_time = NULL` → 保留原水位；`last_run_at`／`status` 仍會更新。
 - `Cursor` 模式送實際水位 → 只前進不後退；較舊的值或整批 `xero_updated_at` 皆為 `nil` 時也不推進。
-- 最後一次 flush 的水位與該 chunk 資料同交易提交，因此「水位前進」與「該批資料寫入成功」必然同時發生或同時不發生；中途 flush 一律送 `NULL`，不推進水位。
+- **-1 秒策略**：cursor 儲存時減 1 秒（`maxAt.Add(-time.Second)`），避免漏資料。重複抓取可接受，冪等 upsert 會處理。
+- **排序保證**：分頁端點自動加入 `order=UpdatedDateUTC`，確保 chunk save 時 cursor 推進是有序的。
 
-### 4.1 狀態轉換時機
+### 4.1 Chunk Save 與 Cursor 更新
+
+分頁端點（Contacts、Invoices、CreditNotes、Payments）支援 chunk save：
+
+- **中間 flush**（達 `writeChunkRows = 500`）：帶 cursor（`maxAt - 1s`），`IsFinalFlush = false`
+  - 只更新 `cursor_time`，不更新 `status` 和 `last_run_at`
+  - 由 `UpdateCursor` 方法處理
+- **最終 flush**（`total > 0` 時）：帶 cursor（`maxAt - 1s`），`IsFinalFlush = true`
+  - 更新 `cursor_time`、`last_run_at`、`status = 'idle'`
+  - 由 `UpsertSyncState` 方法處理（同交易內）
+- **空資料**（`total == 0`）：不呼叫 `ApplyBatch`
+  - 由 `UpsertSyncStateWithoutTx` 更新 `status = 'idle'` 和 `last_run_at`
+  - cursor 也會更新（`maxAt - 1s`，如果有的話）
+
+**Accounts 端點**不分頁（`paginated = false`），每次全量 sync，不需要 chunk save。
+
+### 4.2 狀態轉換時機
 
 `sync_state.status` 遵循 `idle → running → idle/failed` 狀態機：
 
-| 時機 | 方法 | status | last_error | cursor_time |
-|------|------|--------|------------|-------------|
-| `Run`／`RunBatch` 開始前 | `MarkSyncRunning` | `running` | `NULL` | 不變 |
-| `ApplyBatch` 成功（整輪最後一次 flush） | `UpsertSyncState`（交易內） | `idle` | `NULL` | 依 Window 推進或保留 |
-| `Run`／`RunBatch` 失敗（defer） | `MarkSyncFailed` | `failed` | 錯誤訊息 | 不變 |
+| 時機 | 方法 | status | last_error | cursor_time | last_run_at |
+|------|------|--------|------------|-------------|-------------|
+| `Run`／`RunBatch` 開始前 | `MarkSyncRunning` | `running` | `NULL` | 不變 | 不變 |
+| 中間 flush 成功 | `UpdateCursor`（交易內） | 不變 | 不變 | 推進（`maxAt - 1s`） | 不變 |
+| 最終 flush 成功 | `UpsertSyncState`（交易內） | `idle` | `NULL` | 推進（`maxAt - 1s`） | 更新為當前時間 |
+| 空資料成功 | `UpsertSyncStateWithoutTx` | `idle` | `NULL` | 推進（`maxAt - 1s`，如果有） | 更新為當前時間 |
+| `Run`／`RunBatch` 失敗（defer） | `MarkSyncFailed` | `failed` | 錯誤訊息 | 不變 | 更新為當前時間 |
 
 - `MarkSyncRunning` 與 `MarkSyncFailed` 用 `s.db.ExecContext`，不用交易（失敗時資料交易已回滾，無法用交易）。
+- `MarkSyncFailed` 會更新 `last_run_at`，確保從 `sync_state` 可以看出最近一次嘗試同步的時間（即使失敗）。
 - `r.store == nil` 時跳過狀態轉換（維持無 DB 的單元測試行為）。
 - `defer MarkSyncFailed` 確保所有 return path 都會標記 failed；忽略 `MarkSyncFailed` 自身的錯誤，避免掩蓋原始錯誤。
 
@@ -99,8 +121,8 @@ cursor_time = IF(
 
 | 層級 | 行為 |
 |------|------|
-| 單頁 fetch／解析失敗 | `Run` 回錯；先前已 flush 的 chunk 留在 DB，cursor 不動（重跑冪等覆蓋） |
-| `ApplyBatch` 失敗 | 該 chunk 整批回滾，先前已 flush 的資料保留，cursor 不動，回錯 |
+| 單頁 fetch／解析失敗 | `Run` 回錯；先前已 flush 的 chunk 留在 DB，cursor 已更新到最後一個成功的 chunk（`maxAt - 1s`），status 為 `failed`（重跑冪等覆蓋） |
+| `ApplyBatch` 失敗 | 該 chunk 整批回滾，先前已 flush 的資料保留，cursor 已更新到前一個成功的 chunk，回錯 |
 | `RunTenant` 單一實體失敗 | `slog.Warn` 後續跑下一個實體 |
 | `RunTenant` 五個實體全失敗 | 回錯（`tenant ... 全部 5 個實體同步皆失敗`） |
 | `RunAllIncremental` 單一 tenant 失敗 | `slog.Warn` 後續跑下一個 tenant |
@@ -175,7 +197,8 @@ TEST_MYSQL_DSN="root:root@tcp(127.0.0.1:13315)/xero_mirror_test?parseTime=true&l
 ## 10. 已知限制
 
 - 分塊寫入：每累積 500 列就 `flush` 一次，記憶體上限約 600 列（未達門檻的尾段）＋單頁 JSON；交易時間短，不會因資料量大而拉長。
-- 中途失敗時先前已 flush 的 chunk 會留在 DB（可能見到部分新資料），但 cursor 不會前進；下次重跑以相同的 cursor 重抓，靠 `ON DUPLICATE KEY UPDATE` 冪等覆蓋。
+- 中途失敗時先前已 flush 的 chunk 會留在 DB（可能見到部分新資料），cursor 已更新到最後一個成功的 chunk（`maxAt - 1s`）；下次重跑從該 cursor 繼續，靠 `ON DUPLICATE KEY UPDATE` 冪等覆蓋重複抓取的資料。
+- -1 秒策略可能導致重複抓取部分資料（最多 1 秒內的資料），但冪等 upsert 會處理，不會產生重複列。
 - 月度視窗對不支援日期篩選的實體退化為全量，`sync --month` 對這些實體等同全量重跑（結果與全量 sync 相同）。
 - `RunBatch` 只支援 Invoices／Contacts；其他實體回 `端點不支援批量 IDs`，正常流程由 buffer 的 `SupportsBatchIDs` 先擋下。
 - `RunTenant` 部分成功時回 `nil`（錯誤已記 log），呼叫端無法從回傳值區分「全成功」與「部分失敗」；需要精確結果時以 log 的 `failed` 欄位為準。

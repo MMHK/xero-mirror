@@ -14,16 +14,21 @@ type Batch struct {
 	TenantID string
 	Entity   string
 	// Cursor 是本批推進到的水位；nil 代表本批沒有新水位，不會清空既有 cursor。
-	Cursor      *time.Time
-	Contacts    []Contact
-	Accounts    []Account
-	Invoices    []Invoice
-	CreditNotes []CreditNote
-	Payments    []Payment
+	Cursor *time.Time
+	// IsFinalFlush 標記是否為最後一次 flush；只有最後一次才更新 status 和 last_run_at，
+	// 中間 flush 只更新 cursor_time，避免提前把 status 設為 idle。
+	IsFinalFlush bool
+	Contacts     []Contact
+	Accounts     []Account
+	Invoices     []Invoice
+	CreditNotes  []CreditNote
+	Payments     []Payment
 }
 
-// ApplyBatch 在單一交易內 upsert 全部資料並更新 sync_state 的 cursor。
-// 任一 upsert 失敗即整筆回滾，cursor 不會前進；空批次（無資料、無 cursor）直接回 nil。
+// ApplyBatch 在單一交易內 upsert 全部資料並依 IsFinalFlush 決定更新範圍。
+// IsFinalFlush=true 時更新 cursor、status、last_run_at（最後一次 flush 或空資料）；
+// IsFinalFlush=false 且 Cursor!=nil 時只更新 cursor_time（中間 flush，記錄進度但不改變狀態）。
+// 任一 upsert 失敗即整筆回滾；空批次（無資料、無 cursor）直接回 nil。
 func (s *Store) ApplyBatch(ctx context.Context, b Batch) error {
 	if b.empty() {
 		return nil
@@ -35,11 +40,19 @@ func (s *Store) ApplyBatch(ctx context.Context, b Batch) error {
 			return applyErr
 		}
 		n = count
-		now := time.Now().UTC()
-		return s.UpsertSyncState(ctx, tx, SyncState{
-			TenantID: b.TenantID, Entity: b.Entity, CursorTime: b.Cursor,
-			LastRunAt: &now, Status: "idle",
-		})
+
+		// 只有最後一次 flush 才更新 status 和 last_run_at
+		if b.IsFinalFlush {
+			now := time.Now().UTC()
+			return s.UpsertSyncState(ctx, tx, SyncState{
+				TenantID: b.TenantID, Entity: b.Entity, CursorTime: b.Cursor,
+				LastRunAt: &now, Status: "idle",
+			})
+		} else if b.Cursor != nil {
+			// 中間 flush 只更新 cursor_time
+			return s.UpdateCursor(ctx, tx, b.TenantID, b.Entity, b.Cursor)
+		}
+		return nil
 	})
 	if err != nil {
 		return err

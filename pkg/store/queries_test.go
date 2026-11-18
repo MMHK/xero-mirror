@@ -155,3 +155,22 @@ func TestMarkSyncFailedPreservesCursor(t *testing.T) {
 	require.True(t, st.CursorTime.Equal(cursor), "MarkSyncFailed 不得動到 cursor_time")
 	require.Equal(t, "failed", st.Status)
 }
+
+// TestMarkSyncFailedUpdatesLastRunAt 驗證 MarkSyncFailed 會更新 last_run_at。
+func TestMarkSyncFailedUpdatesLastRunAt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	// 先建立一筆記錄
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-failed-last-run", "INVOICE", "首次失敗"))
+
+	// 再次呼叫 MarkSyncFailed，last_run_at 應該更新為現在
+	before := time.Now().UTC().Add(-time.Second)
+	require.NoError(t, s.MarkSyncFailed(ctx, "t-failed-last-run", "INVOICE", "新錯誤"))
+	after := time.Now().UTC().Add(time.Second)
+
+	st, err := s.GetSyncState(ctx, "t-failed-last-run", "INVOICE")
+	require.NoError(t, err)
+	require.NotNil(t, st.LastRunAt, "MarkSyncFailed 應更新 last_run_at")
+	require.True(t, st.LastRunAt.After(before), "last_run_at 應在呼叫時間之後")
+	require.True(t, st.LastRunAt.Before(after), "last_run_at 應在合理範圍內")
+}

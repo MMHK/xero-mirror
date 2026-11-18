@@ -133,13 +133,35 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 	} else if _, err := a.handle(0, body); err != nil {
 		return fmt.Errorf("同步 %s: %w", entity, err)
 	}
-	if a.total > 0 {
-		cursor := (*time.Time)(nil)
-		if a.trackCursor {
-			cursor = a.maxAt
-		}
-		if err := a.flush(cursor); err != nil {
-			return fmt.Errorf("同步 %s: %w", entity, err)
+	if r.store != nil {
+		if a.total > 0 {
+			cursor := (*time.Time)(nil)
+			if a.trackCursor && a.maxAt != nil {
+				// -1 秒策略，避免漏資料
+				t := a.maxAt.Add(-time.Second)
+				cursor = &t
+			}
+			if err := a.flush(cursor, true); err != nil {
+				return fmt.Errorf("同步 %s: %w", entity, err)
+			}
+		} else {
+			// 沒有資料時，也要更新 status 和 last_run_at
+			now := time.Now().UTC()
+			var cursor *time.Time
+			if a.trackCursor && a.maxAt != nil {
+				// -1 秒策略，避免漏資料
+				t := a.maxAt.Add(-time.Second)
+				cursor = &t
+			}
+			if err := r.store.UpsertSyncStateWithoutTx(ctx, store.SyncState{
+				TenantID:   tenantID,
+				Entity:     string(entity),
+				CursorTime: cursor,
+				LastRunAt:  &now,
+				Status:     "idle",
+			}); err != nil {
+				slog.Warn("更新 sync_state 失敗", "tenant", tenantID, "entity", entity, "err", err)
+			}
 		}
 	}
 	slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", a.total)
@@ -192,7 +214,7 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 		}
 	}
 	if a.total > 0 {
-		if err := a.flush(nil); err != nil {
+		if err := a.flush(nil, true); err != nil {
 			return fmt.Errorf("批量同步 %s: %w", entity, err)
 		}
 	}
@@ -418,7 +440,14 @@ func (a *pageApplier) handle(page int, body []byte) (int, error) {
 	a.total += n
 	slog.Debug("抓取分頁", "tenant", a.tenantID, "entity", a.entity, "page", page, "count", n)
 	if a.pending() >= writeChunkRows {
-		if err := a.flush(nil); err != nil {
+		// 中間 flush 也帶 cursor（因為資料已按 UpdatedDateUTC 排序）
+		// -1 秒策略，避免漏資料
+		var cursor *time.Time
+		if a.trackCursor && a.maxAt != nil {
+			t := a.maxAt.Add(-time.Second)
+			cursor = &t
+		}
+		if err := a.flush(cursor, false); err != nil {
 			return 0, err
 		}
 	}
@@ -428,7 +457,8 @@ func (a *pageApplier) handle(page int, body []byte) (int, error) {
 // flush 把目前累積的資料寫入 DB；Batch 的 TenantID／Entity 由 flush 自行填入，
 // 成功後只清空五個 slice，失敗時保留累積內容並直接回錯。
 // cursor 只有整輪最後一次 flush 會帶入；store 為 nil（無 DB 的單元測試）時直接略過，不 panic。
-func (a *pageApplier) flush(cursor *time.Time) error {
+// isFinal 標記是否為最後一次 flush，決定 ApplyBatch 是否更新 status 和 last_run_at。
+func (a *pageApplier) flush(cursor *time.Time, isFinal bool) error {
 	if a.store == nil {
 		return nil
 	}
@@ -436,6 +466,7 @@ func (a *pageApplier) flush(cursor *time.Time) error {
 	b.TenantID = a.tenantID
 	b.Entity = string(a.entity)
 	b.Cursor = cursor
+	b.IsFinalFlush = isFinal
 	rows := a.pending()
 	if err := a.store.ApplyBatch(a.ctx, b); err != nil {
 		return err
@@ -447,7 +478,7 @@ func (a *pageApplier) flush(cursor *time.Time) error {
 	a.batch.Payments = nil
 	a.written += rows
 	slog.Debug("分塊寫入", "tenant", a.tenantID, "entity", a.entity,
-		"rows", rows, "total", a.written, "with_cursor", cursor != nil)
+		"rows", rows, "total", a.written, "with_cursor", cursor != nil, "is_final", isFinal)
 	return nil
 }
 
@@ -539,6 +570,13 @@ func validateWindow(w Window) error {
 func buildRequest(spec entitySpec, w Window) (url.Values, map[string]string) {
 	query := url.Values{}
 	headers := map[string]string{}
+
+	// 確保按 UpdatedDateUTC 排序（chunk save 依賴此排序）
+	// 只對分頁端點生效，Accounts 不分頁不需要
+	if spec.paginated {
+		query.Set("order", "UpdatedDateUTC")
+	}
+
 	if w.Cursor != nil && spec.supportsSince {
 		headers["If-Modified-Since"] = w.Cursor.UTC().Format(http.TimeFormat)
 	}

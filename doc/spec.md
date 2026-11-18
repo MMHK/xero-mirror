@@ -144,7 +144,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 - 金額保留 Xero 回傳字串，加總／比較用十進位字串或整數最小單位，**禁 `float64`**。
 - 軟刪除只鏡射 `STATUS`（`DELETED` / `ARCHIVED`），**不得**因 API 沒回傳就 `DELETE` 本地列。
 - `sync_state.status` 列舉值固定為 `idle` / `running` / `failed` / `auth_required`；`auth_required` 目前為**保留值**（未實作寫入），授權失效由 `xero_tenants.auth_status` 表達、`ListTenants` 只列 `active` 來跳過，**不得**把 refresh 回傳的 `invalid_grant` 直接寫進 entity 級狀態。
-- `sync_state` 狀態機：`idle → running → idle/failed`。`Run` 與 `RunBatch` 開始前呼叫 `MarkSyncRunning`（status='running'、清除 last_error），成功時由 `ApplyBatch` 寫回 `status='idle'`，失敗時由 `defer MarkSyncFailed` 標記 `status='failed'` 並記錄 `last_error`。`MarkSyncRunning` 與 `MarkSyncFailed` 不用交易（失敗時資料交易已回滾），且保留 `cursor_time` 與 `last_run_at` 不變。
+- `sync_state` 狀態機：`idle → running → idle/failed`。`Run` 與 `RunBatch` 開始前呼叫 `MarkSyncRunning`（status='running'、清除 last_error），成功時由 `ApplyBatch` 寫回 `status='idle'` 並更新 `last_run_at`，失敗時由 `defer MarkSyncFailed` 標記 `status='failed'`、記錄 `last_error` 並更新 `last_run_at`。`MarkSyncRunning` 與 `MarkSyncFailed` 不用交易（失敗時資料交易已回滾），且保留 `cursor_time` 不變。
 - `xero_tenants.auth_status` 為 `active` / `auth_required`：refresh 失敗（`invalid_grant`）時只在此標記需重新授權。
 - **權責集中**（§4／§6 共用）：refresh 層**只**寫 `xero_tenants.auth_status`；`sync_state.status` 由同步編排讀 `auth_status` 後投影，任何層都不得直接把 `invalid_grant` 寫進 `sync_state`。
 - `sync_jobs` 去重：唯一鍵 `(tenant_id, entity, xero_id)`（**不含**可變的 `status`），`status` 為可變欄位，入列時用 `ON DUPLICATE KEY UPDATE` 只刷新待辦狀態；`status` 列舉值固定為 `pending` / `running` / `done` / `failed`，webhook 重送不得產生重複 job。

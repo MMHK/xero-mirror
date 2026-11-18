@@ -71,13 +71,14 @@ ON DUPLICATE KEY UPDATE
     status = 'running',
     last_error = NULL`
 
-// markSyncFailedSQL 標記同步失敗：列不存在時 INSERT（首次同步就失敗），列存在時只更新 status 與 last_error。
+// markSyncFailedSQL 標記同步失敗：列不存在時 INSERT（首次同步就失敗），列存在時更新 status、last_error 與 last_run_at。
 const markSyncFailedSQL = `
-INSERT INTO sync_state (tenant_id, entity, status, last_error)
-VALUES (?, ?, 'failed', ?)
+INSERT INTO sync_state (tenant_id, entity, status, last_error, last_run_at)
+VALUES (?, ?, 'failed', ?, NOW(6))
 ON DUPLICATE KEY UPDATE
     status = 'failed',
-    last_error = VALUES(last_error)`
+    last_error = VALUES(last_error),
+    last_run_at = VALUES(last_run_at)`
 
 const insertWebhookEventSQL = `
 INSERT INTO webhook_events (
@@ -497,6 +498,35 @@ func (s *Store) InsertFailedSyncJob(ctx context.Context, tx *sql.Tx, j FailedSyn
 		j.TenantID, j.Entity, j.XeroID, j.Reason, j.LastError, j.FailedAt)
 	if err != nil {
 		return fmt.Errorf("插入 failed_sync_job: %w", err)
+	}
+	return nil
+}
+
+const updateCursorSQL = `
+UPDATE sync_state
+SET cursor_time = IF(
+    ? IS NULL,
+    cursor_time,
+    GREATEST(?, IFNULL(cursor_time, ?))
+)
+WHERE tenant_id = ? AND entity = ?`
+
+// UpdateCursor 只更新 cursor_time，不更新 status 和 last_run_at。
+// 用於中間 flush，讓 sync_state 記錄進度但不改變狀態。
+func (s *Store) UpdateCursor(ctx context.Context, tx *sql.Tx, tenantID, entity string, cursor *time.Time) error {
+	_, err := tx.ExecContext(ctx, updateCursorSQL, cursor, cursor, cursor, tenantID, entity)
+	if err != nil {
+		return fmt.Errorf("更新 cursor %s/%s: %w", tenantID, entity, err)
+	}
+	return nil
+}
+
+// UpsertSyncStateWithoutTx 不需要交易，用於空資料時更新 status。
+func (s *Store) UpsertSyncStateWithoutTx(ctx context.Context, st SyncState) error {
+	_, err := s.db.ExecContext(ctx, upsertSyncStateSQL,
+		st.TenantID, st.Entity, st.CursorTime, st.LastRunAt, st.Status, st.LastError)
+	if err != nil {
+		return fmt.Errorf("upsert sync_state %s/%s: %w", st.TenantID, st.Entity, err)
 	}
 	return nil
 }

@@ -523,12 +523,14 @@ func TestRunChunkedWriteAdvancesCursor(t *testing.T) {
 	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
 	require.NoError(t, err)
 	require.NotNil(t, got.CursorTime)
-	require.True(t, got.CursorTime.Equal(base.Add(6*time.Minute)), "cursor 應為最大 UpdatedDateUTC")
+	// -1 秒策略：cursor = maxAt - 1s
+	expected := base.Add(6 * time.Minute).Add(-time.Second)
+	require.True(t, got.CursorTime.Equal(expected), "cursor 應為最大 UpdatedDateUTC - 1s")
 }
 
-// TestRunChunkedWriteFailureKeepsOldCursor 驗證第 7 頁失敗時，前段已 flush 的資料留在 DB，
-// 但 cursor 不前進。
-func TestRunChunkedWriteFailureKeepsOldCursor(t *testing.T) {
+// TestRunChunkedWriteFailureAdvancesCursorToLastChunk 驗證第 7 頁失敗時，前段已 flush 的資料留在 DB，
+// 中間 flush 已推進 cursor 到 maxAt - 1 秒（-1 秒策略），status 為 failed。
+func TestRunChunkedWriteFailureAdvancesCursorToLastChunk(t *testing.T) {
 	ctx := context.Background()
 	const tenant = "t4chunk-fail"
 	old := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
@@ -552,7 +554,10 @@ func TestRunChunkedWriteFailureKeepsOldCursor(t *testing.T) {
 	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
 	require.NoError(t, err)
 	require.NotNil(t, got.CursorTime)
-	require.True(t, got.CursorTime.Equal(old), "抓取失敗不得推進 cursor")
+	// 中間 flush 已推進 cursor 到前 5 頁的 maxAt - 1 秒
+	expectedCursor := base.Add(5 * time.Minute).Add(-time.Second)
+	require.True(t, got.CursorTime.Equal(expectedCursor), "中間 flush 應推進 cursor 到 maxAt - 1 秒")
+	require.Equal(t, "failed", got.Status, "最終 fetch 失敗時 status 應為 failed")
 }
 
 // TestRunSingleUsesSingleGetEndpoint 驗證 RunSingle 以 /{Entity}/{id} 端點抓取，
@@ -633,4 +638,71 @@ func TestRunMarksFailedOnError(t *testing.T) {
 	require.NotNil(t, got.LastError, "失敗後 last_error 應非空")
 	require.NotNil(t, got.CursorTime)
 	require.True(t, got.CursorTime.Equal(cursor), "失敗不得推進 cursor")
+}
+
+// TestChunkSaveIntermediateFlushUpdatesCursor 驗證中間 flush 時 cursor 正確更新（-1 秒策略）。
+// 模擬 chunk save 中途失敗：前 5 頁成功觸發中間 flush，第 7 頁失敗。
+// 確認 cursor 已更新到最後一個成功的 chunk（maxAt - 1 秒），status 是 'failed'。
+func TestChunkSaveIntermediateFlushUpdatesCursor(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t5chunk-mid-cursor"
+	old := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	r, st := newDBRunner(t, func(w http.ResponseWriter, req *http.Request) {
+		page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+		if page > 6 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, invoicePage(fmt.Sprintf("inv-mid-%d", page), 100, base.Add(time.Duration(page)*time.Minute)))
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, st.ApplyBatch(ctx, store.Batch{
+		TenantID: tenant, Entity: string(EntityInvoices), Cursor: &old,
+	}))
+	require.Error(t, r.Run(ctx, tenant, EntityInvoices, Window{Cursor: &old}))
+	// 中間 flush 已更新 cursor 到 maxAt - 1 秒（前 5 頁的 maxAt = base + 5min）
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.NotNil(t, got.CursorTime)
+	expectedCursor := base.Add(5 * time.Minute).Add(-time.Second)
+	require.True(t, got.CursorTime.Equal(expectedCursor), "中間 flush 應更新 cursor 到 maxAt - 1 秒")
+	require.Equal(t, "failed", got.Status, "最終 flush 失敗時 status 應為 failed")
+}
+
+// TestEmptyDataUpdatesStatusToIdle 驗證空資料時 status 正確更新為 'idle'，last_run_at 有更新。
+func TestEmptyDataUpdatesStatusToIdle(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t5empty-idle"
+	r, st := newDBRunner(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"Invoices":[]}`)
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	before := time.Now().UTC().Add(-time.Minute)
+	require.NoError(t, r.Run(ctx, tenant, EntityInvoices, Window{}))
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.Equal(t, "idle", got.Status, "空資料時 status 應為 idle")
+	require.NotNil(t, got.LastRunAt, "空資料時 last_run_at 應有更新")
+	require.True(t, got.LastRunAt.After(before), "last_run_at 應在測試開始之後")
+}
+
+// TestFinalFlushCursorMinusOneSecond 驗證最終 flush 的 cursor 正確減 1 秒。
+// 模擬正常同步完成，確認 cursor 是 maxAt - 1 秒（-1 秒策略）。
+func TestFinalFlushCursorMinusOneSecond(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "t5final-cursor-1s"
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	maxTime := base.Add(10 * time.Minute)
+	r, st := newDBRunner(t, func(w http.ResponseWriter, _ *http.Request) {
+		// 回傳一筆資料，UpdatedDateUTC 為 maxTime
+		fmt.Fprint(w, invoicePage("inv-final", 1, maxTime))
+	})
+	t.Cleanup(func() { require.NoError(t, st.DeleteTenant(ctx, tenant)) })
+	require.NoError(t, r.Run(ctx, tenant, EntityInvoices, Window{}))
+	got, err := st.GetSyncState(ctx, tenant, string(EntityInvoices))
+	require.NoError(t, err)
+	require.NotNil(t, got.CursorTime)
+	expectedCursor := maxTime.Add(-time.Second)
+	require.True(t, got.CursorTime.Equal(expectedCursor), "最終 cursor 應為 maxAt - 1 秒")
 }
