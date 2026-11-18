@@ -139,5 +139,3 @@ func TestHandleEnqueuesOncePerEvent(t *testing.T) {
 		require.Equal(t, 2, events, "不同 eventDate 視為不同事件")
 	})
 }
-
-

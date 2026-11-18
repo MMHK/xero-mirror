@@ -54,6 +54,8 @@ type Config struct {
 	SyncJobPollInterval time.Duration
 	// LogLevel 是全域日誌等級，由 LOG_LEVEL 解析；未設定時為 info。
 	LogLevel slog.Level
+	// SwaggerEnabled 控制是否啟用 Swagger 文件端點，由 SWAGGER_ENABLED 解析；預設關閉。
+	SwaggerEnabled bool
 }
 
 // Load 讀取並驗證設定；.env 存在才載入，不存在則直接使用環境變數。
@@ -81,18 +83,19 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		ClientID:           env["XERO_CLIENT_ID"],
-		ClientSecret:       env["XERO_CLIENT_SECRET"],
-		RedirectURI:        env["XERO_REDIRECT_URI"],
-		WebhookKey:         env["XERO_WEBHOOK_KEY"],
-		TokenEncKey:        key,
-		MySQLDSN:           env["MYSQL_DSN"],
-		SyncCron:           env["SYNC_CRON"],
-		HTTPAddr:           env["HTTP_ADDR"],
-		DailyCallLimit:     opt.dailyCallLimit,
-		SyncJobBatchSize:     opt.syncJobBatchSize,
-		SyncJobPollInterval:  time.Duration(opt.syncJobPollIntervalMs) * time.Millisecond,
-		LogLevel:           opt.logLevel,
+		ClientID:            env["XERO_CLIENT_ID"],
+		ClientSecret:        env["XERO_CLIENT_SECRET"],
+		RedirectURI:         env["XERO_REDIRECT_URI"],
+		WebhookKey:          env["XERO_WEBHOOK_KEY"],
+		TokenEncKey:         key,
+		MySQLDSN:            env["MYSQL_DSN"],
+		SyncCron:            env["SYNC_CRON"],
+		HTTPAddr:            env["HTTP_ADDR"],
+		DailyCallLimit:      opt.dailyCallLimit,
+		SyncJobBatchSize:    opt.syncJobBatchSize,
+		SyncJobPollInterval: time.Duration(opt.syncJobPollIntervalMs) * time.Millisecond,
+		LogLevel:            opt.logLevel,
+		SwaggerEnabled:      opt.swaggerEnabled,
 	}, nil
 }
 
@@ -111,10 +114,11 @@ func loadRequiredEnv() (map[string]string, error) {
 
 // optionalSettings 是選用環境變數解析後的結果。
 type optionalSettings struct {
-	dailyCallLimit      int
-	syncJobBatchSize    int
+	dailyCallLimit        int
+	syncJobBatchSize      int
 	syncJobPollIntervalMs int
-	logLevel            slog.Level
+	logLevel              slog.Level
+	swaggerEnabled        bool
 }
 
 // parseOptionalSettings 解析選用變數；任一格式錯誤即回錯，未設定則採預設。
@@ -131,6 +135,9 @@ func parseOptionalSettings() (optionalSettings, error) {
 		return s, err
 	}
 	if s.logLevel, err = parseLogLevel(os.Getenv("LOG_LEVEL")); err != nil {
+		return s, err
+	}
+	if s.swaggerEnabled, err = parseSwaggerEnabled(os.Getenv("SWAGGER_ENABLED")); err != nil {
 		return s, err
 	}
 	return s, nil
@@ -243,5 +250,17 @@ func parseLogLevel(raw string) (slog.Level, error) {
 		return slog.LevelError, nil
 	default:
 		return 0, fmt.Errorf("LOG_LEVEL 必須是 debug|info|warn|error（目前 %q）", raw)
+	}
+}
+
+// parseSwaggerEnabled 解析 SWAGGER_ENABLED（大小寫不敏感）；未設定時預設關閉。
+func parseSwaggerEnabled(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("SWAGGER_ENABLED 必須是 true|false（目前 %q）", raw)
 	}
 }

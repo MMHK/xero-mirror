@@ -12,7 +12,7 @@ import (
 
 // 案例 1：POST /webhook 經 NewMux 打到 webhook，簽章錯回 401，證明路由接線。
 func TestMuxRoutesWebhook(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(true))
 	body := webhookBody(1, "mux-tenant")
 	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
 	req.Header.Set("x-xero-signature", "bad-signature")
@@ -26,7 +26,7 @@ func TestMuxRoutesWebhook(t *testing.T) {
 func TestMuxRoutesHealth(t *testing.T) {
 	t.Run("DB 正常回 200", func(t *testing.T) {
 		s := openHandlerStore(t)
-		mux := NewMux(nil, NewHealthHandler(s), nil, NewPageHandler())
+		mux := NewMux(nil, NewHealthHandler(s), NewStatusHandler(nil), NewPageHandler(false))
 		rec := httptest.NewRecorder()
 
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -34,7 +34,7 @@ func TestMuxRoutesHealth(t *testing.T) {
 		require.JSONEq(t, `{"status":"ok"}`, rec.Body.String())
 	})
 	t.Run("POST 回 405", func(t *testing.T) {
-		mux := NewMux(nil, NewHealthHandler(nil), nil, NewPageHandler())
+		mux := NewMux(nil, NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(false))
 		rec := httptest.NewRecorder()
 
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/health", nil))
@@ -43,33 +43,9 @@ func TestMuxRoutesHealth(t *testing.T) {
 	})
 }
 
-// 案例 3：GET /admin/sync 回 405；POST 缺 entity（驗證失敗）回 400 且不碰 runner。
-func TestMuxRoutesAdminValidation(t *testing.T) {
-	mux := NewMux(nil, nil, NewAdminHandler(nil, nil), NewPageHandler())
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/sync", nil))
-	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-	require.Equal(t, http.MethodPost, rec.Header().Get("Allow"))
-
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/sync?tenant=t1", nil))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"error":"tenant 與 entity 為必填且 entity 必須合法"}`, rec.Body.String())
-}
-
-// 案例 4：未知 entity 回 400；runner 傳 nil，若驗證沒擋住會在 runner.Run 處 panic 被測試抓到。
-func TestAdminRejectsUnknownEntityWithoutRunner(t *testing.T) {
-	h := NewAdminHandler(nil, nil)
-	rec := httptest.NewRecorder()
-
-	h.Handle(rec, httptest.NewRequest(http.MethodPost, "/admin/sync?tenant=t1&entity=bogus", nil))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// 案例 5：GET / 回介紹頁 200 text/html，body 含站名。
+// 案例 3：GET / 回介紹頁 200 text/html，body 含站名。
 func TestPageHome(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(false))
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -78,20 +54,30 @@ func TestPageHome(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "xero-mirror")
 }
 
-// 案例 6：GET /docs 回 Swagger UI 殼層 200 text/html，body 含掛載點。
-func TestPageDocs(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+// 案例 4：GET /swagger 開啟時回 Swagger UI 殼層 200 text/html，body 含掛載點。
+func TestPageSwaggerEnabled(t *testing.T) {
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(true))
 	rec := httptest.NewRecorder()
 
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/swagger", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Header().Get("Content-Type"), "text/html")
 	require.Contains(t, rec.Body.String(), `id="swagger-ui"`)
 }
 
-// 案例 7：GET /openapi.json 回 200 application/json，版本為 3.0.3 且路徑齊全。
+// 案例 5：SWAGGER_ENABLED=false 時，GET /swagger 與 /openapi.json 都回 404。
+func TestPageSwaggerDisabled(t *testing.T) {
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(false))
+	for _, p := range []string{"/swagger", "/openapi.json"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		require.Equal(t, http.StatusNotFound, rec.Code, p)
+	}
+}
+
+// 案例 6：GET /openapi.json 開啟時回 200 application/json，版本為 3.0.3 且路徑齊全。
 func TestPageOpenAPISpec(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(true))
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
@@ -103,7 +89,7 @@ func TestPageOpenAPISpec(t *testing.T) {
 	require.Equal(t, "3.0.3", spec["openapi"])
 	paths, ok := spec["paths"].(map[string]any)
 	require.True(t, ok, "paths 應為物件")
-	for _, p := range []string{"/health", "/webhook", "/admin/sync"} {
+	for _, p := range []string{"/health", "/webhook"} {
 		require.Contains(t, paths, p)
 	}
 	health, ok := paths["/health"].(map[string]any)
@@ -111,10 +97,10 @@ func TestPageOpenAPISpec(t *testing.T) {
 	require.Contains(t, health, "get")
 }
 
-// 案例 8：頁面路由對非 GET 回 405 + Allow: GET（表驅動）。
+// 案例 7：頁面路由對非 GET 回 405 + Allow: GET（表驅動）。
 func TestPageMethodsNotAllowed(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
-	for _, p := range []string{"/", "/docs", "/openapi.json"} {
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(true))
+	for _, p := range []string{"/", "/swagger", "/openapi.json"} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, nil))
 		require.Equal(t, http.StatusMethodNotAllowed, rec.Code, p)
@@ -122,9 +108,9 @@ func TestPageMethodsNotAllowed(t *testing.T) {
 	}
 }
 
-// 案例 9：GET /unknown 回 404，不回介紹頁。
+// 案例 8：GET /unknown 回 404，不回介紹頁。
 func TestPageUnknownPath(t *testing.T) {
-	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewAdminHandler(nil, nil), NewPageHandler())
+	mux := NewMux(NewWebhookHandler(nil, []byte(testWebhookKey)), NewHealthHandler(nil), NewStatusHandler(nil), NewPageHandler(false))
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))

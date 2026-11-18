@@ -1,4 +1,4 @@
-// entity.go 集中 sync 實體名稱的別名解析，避免 CLI 與 admin 各自維護一份清單。
+// entity.go 集中 sync 實體名稱的別名解析，避免各處各自維護一份清單。
 package sync
 
 import "strings"

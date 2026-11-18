@@ -135,6 +135,7 @@ func syncWindow(month string) (*sync.Window, error) {
 
 // buildRunner 組出同步執行器（cipher → OAuth → TokenManager → Client → Runner）；
 // sync 與 serve 共用同一套組裝，避免兩處各建一份 OAuth／client。
+// Client 在這裡設定 rate limit callback，確保所有模式（sync/serve）都能收集 Xero API 配額。
 func buildRunner(cfg *config.Config, st *store.Store) (*sync.Runner, error) {
 	cipher, err := xero.NewCipher(cfg.TokenEncKey)
 	if err != nil {
@@ -144,6 +145,16 @@ func buildRunner(cfg *config.Config, st *store.Store) (*sync.Runner, error) {
 	tm := xero.NewTokenManager(st, cipher, oauth)
 	client := xero.NewClient(tm)
 	client.SetDailyCallLimit(cfg.DailyCallLimit)
+	// 設定 rate limit callback：Xero client 每次收到 response 時非同步更新 tenant 的 rate limit 快照。
+	client.SetRateLimitCallback(func(tenantID string, info xero.RateLimitInfo) {
+		if err := st.UpdateTenantRateLimit(context.Background(), tenantID, store.RateLimitInfo{
+			DayLimitRemaining:       info.DayLimitRemaining,
+			MinuteLimitRemaining:    info.MinuteLimitRemaining,
+			AppMinuteLimitRemaining: info.AppMinuteLimitRemaining,
+		}); err != nil {
+			slog.Warn("update tenant rate limit failed", "tenant", tenantID, "err", err)
+		}
+	})
 	return sync.NewRunner(client, st), nil
 }
 
@@ -196,8 +207,8 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 	mux := handler.NewMux(
 		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey)),
 		handler.NewHealthHandler(st),
-		handler.NewAdminHandler(runner, st),
-		handler.NewPageHandler(),
+		handler.NewStatusHandler(st),
+		handler.NewPageHandler(cfg.SwaggerEnabled),
 	)
 	// SkipIfStillRunning：上一輪同步還在跑時跳過本輪，避免長同步與下一輪 cron 重疊。
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))

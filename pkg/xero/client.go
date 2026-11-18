@@ -44,6 +44,13 @@ const (
 	errPrefixNotFound    = "未找到"
 )
 
+// RateLimitInfo 是 Xero API response 的 rate limit headers。
+type RateLimitInfo struct {
+	DayLimitRemaining       int
+	MinuteLimitRemaining    int
+	AppMinuteLimitRemaining int
+}
+
 // dailyCalls 是單一 tenant 的每日呼叫計數，day 為 UTC 日期。
 type dailyCalls struct {
 	day string
@@ -61,6 +68,7 @@ type Client struct {
 	limiters    map[string]*rate.Limiter
 	dailyLimit  int
 	daily       map[string]*dailyCalls
+	onRateLimit func(tenantID string, info RateLimitInfo) // 非同步通知 rate limit 更新
 }
 
 // NewClient 建立 client；tm 可為 nil（測試自行注入 tokenSource）。
@@ -115,6 +123,11 @@ func (c *Client) setBaseURL(u string) error {
 // SetDailyCallLimit 設定每 tenant 每日呼叫上限；<= 0 代表不限制。
 func (c *Client) SetDailyCallLimit(n int) {
 	c.dailyLimit = n
+}
+
+// SetRateLimitCallback 設定 rate limit 更新回調；用於非同步寫入 DB。
+func (c *Client) SetRateLimitCallback(fn func(tenantID string, info RateLimitInfo)) {
+	c.onRateLimit = fn
 }
 
 // IsRateLimited 判斷錯誤是否為 429 限流（以固定前綴辨識）。
@@ -308,7 +321,32 @@ func (c *Client) doOnce(ctx context.Context, endpoint, tenantID, token string, h
 	if len(body) > maxBodySize {
 		return nil, resp.StatusCode, "", fmt.Errorf("Xero 回應超過 %d bytes 上限", maxBodySize)
 	}
+
+	dayLimit := parseIntHeader(resp.Header, "X-DayLimit-Remaining")
+	minLimit := parseIntHeader(resp.Header, "X-MinLimit-Remaining")
+	appMinLimit := parseIntHeader(resp.Header, "X-AppMinLimit-Remaining")
+	if c.onRateLimit != nil && (dayLimit >= 0 || minLimit >= 0 || appMinLimit >= 0) {
+		go c.onRateLimit(tenantID, RateLimitInfo{
+			DayLimitRemaining:       dayLimit,
+			MinuteLimitRemaining:    minLimit,
+			AppMinuteLimitRemaining: appMinLimit,
+		})
+	}
+
 	return body, resp.StatusCode, resp.Header.Get("Retry-After"), nil
+}
+
+// parseIntHeader 解析整數 header；缺值或格式錯誤回 -1。
+func parseIntHeader(h http.Header, key string) int {
+	v := h.Get(key)
+	if v == "" {
+		return -1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // retryDelay 依 Retry-After 決定退避秒數，缺值時用 attempt 遞增退避（上限 30s）。

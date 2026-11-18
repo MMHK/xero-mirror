@@ -3,7 +3,7 @@
   "info": {
     "title": "xero-mirror API",
     "version": "0.1.0",
-    "description": "xero-mirror 把 Xero Accounting 資料單向鏡射到本地 MySQL，提供 webhook 接收、健康檢查與手動觸發同步三個端點。本服務僅供內網部署，`/admin/sync` 無內建認證，必須置於私有網路或反向代理之後。本服務端點只允許 GET／POST，其他方法一律回 405 並帶 Allow header；未知路徑回 404。"
+    "description": "xero-mirror 把 Xero Accounting 資料單向鏡射到本地 MySQL，提供 webhook 接收與健康檢查端點。本服務端點只允許 GET／POST，其他方法一律回 405 並帶 Allow header；未知路徑回 404。"
   },
   "paths": {
     "/health": {
@@ -84,17 +84,17 @@
         }
       }
     },
-    "/admin/sync": {
-      "post": {
-        "summary": "手動觸發同步",
-        "description": "對單一 tenant／entity 觸發同步，參數可用 query string 或 `application/x-www-form-urlencoded` form 傳送（兩者皆可，同名字段以 form 為準）。`tenant`、`entity` 必填，缺一或 `entity` 未知回 400 且不呼叫 runner。省略 `month` 時依 `sync_state.cursor_time` 增量，無紀錄視為首跑全量。此端點無內建認證，只可部署於私有網路或反向代理後方。",
-        "operationId": "postAdminSync",
+    "/api/status/sync": {
+      "get": {
+        "summary": "同步狀態",
+        "description": "查詢各 tenant × entity 的 `sync_state` 記錄，支援 `tenant` 與 `entity` query params 過濾。",
+        "operationId": "getStatusSync",
         "parameters": [
           {
             "name": "tenant",
             "in": "query",
-            "required": true,
-            "description": "Xero tenant ID；必填。",
+            "required": false,
+            "description": "過濾特定 tenant_id；空值代表不過濾。",
             "schema": {
               "type": "string"
             }
@@ -102,68 +102,92 @@
           {
             "name": "entity",
             "in": "query",
-            "required": true,
-            "description": "要同步的實體；大小寫不敏感，接受 contacts／accounts／invoices／invoice／creditnotes／credit_notes／payments／payment。必填。",
+            "required": false,
+            "description": "過濾特定 entity；空值代表不過濾。",
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "month",
-            "in": "query",
-            "required": false,
-            "description": "選填；`YYYY-MM` 格式，有值時同步該月 00:00 UTC 起、下月 00:00 止的半開視窗。",
-            "schema": {
-              "type": "string",
-              "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
-              "example": "2026-05"
-            }
           }
         ],
-        "requestBody": {
-          "required": false,
-          "description": "與 query 參數等價的表單欄位；query 或 form 皆可。",
-          "content": {
-            "application/x-www-form-urlencoded": {
-              "schema": {
-                "$ref": "#/components/schemas/AdminSyncForm"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "同步成功。",
+            "description": "同步狀態清單。",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StatusOk"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "表單解析失敗、`tenant`／`entity` 缺失、`entity` 未知，或 `month` 不是 `YYYY-MM`。",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/StatusSyncResponse"
                 }
               }
             }
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
-          },
-          "500": {
-            "description": "讀取同步狀態失敗或同步失敗。",
+          }
+        }
+      }
+    },
+    "/api/status/jobs": {
+      "get": {
+        "summary": "同步佇列統計",
+        "description": "查詢 `sync_jobs` 各狀態（pending、processing、failed）的筆數與總數。",
+        "operationId": "getStatusJobs",
+        "responses": {
+          "200": {
+            "description": "同步佇列統計。",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SyncFailed"
+                  "$ref": "#/components/schemas/StatusJobsResponse"
                 }
               }
             }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/api/status/tenants": {
+      "get": {
+        "summary": "Tenant 狀態（含 Rate Limit 配額）",
+        "description": "查詢全部 tenant 的狀態與 rate limit 配額剩餘量；rate limit 由 Xero API response headers 非同步更新。",
+        "operationId": "getStatusTenants",
+        "responses": {
+          "200": {
+            "description": "Tenant 清單與 rate limit 配額。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusTenantsResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/api/status/webhooks": {
+      "get": {
+        "summary": "Webhook 事件統計",
+        "description": "查詢 `webhook_events` 的 pending、processed 與總筆數。",
+        "operationId": "getStatusWebhooks",
+        "responses": {
+          "200": {
+            "description": "Webhook 事件統計。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusWebhooksResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           }
         }
       }
@@ -201,21 +225,6 @@
           }
         }
       },
-      "StatusOk": {
-        "type": "object",
-        "description": "通用成功回應。",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "ok"
-            ]
-          }
-        }
-      },
       "ErrorResponse": {
         "type": "object",
         "description": "通用錯誤回應；`error` 為繁體中文訊息。",
@@ -225,44 +234,7 @@
         "properties": {
           "error": {
             "type": "string",
-            "example": "tenant 與 entity 為必填且 entity 必須合法"
-          }
-        }
-      },
-      "SyncFailed": {
-        "type": "object",
-        "description": "同步失敗回應。",
-        "required": [
-          "error"
-        ],
-        "properties": {
-          "error": {
-            "type": "string",
-            "example": "同步失敗"
-          }
-        }
-      },
-      "AdminSyncForm": {
-        "type": "object",
-        "description": "`/admin/sync` 的表單欄位，語意與 query 參數相同。",
-        "required": [
-          "tenant",
-          "entity"
-        ],
-        "properties": {
-          "tenant": {
-            "type": "string",
-            "description": "Xero tenant ID；必填。"
-          },
-          "entity": {
-            "type": "string",
-            "description": "要同步的實體；大小寫不敏感，接受 contacts／accounts／invoices／invoice／creditnotes／credit_notes／payments／payment。"
-          },
-          "month": {
-            "type": "string",
-            "description": "選填；`YYYY-MM` 格式。",
-            "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
-            "example": "2026-05"
+            "example": "請求參數不合法"
           }
         }
       },
@@ -349,6 +321,152 @@
               "PAYMENT",
               "SUBSCRIPTION"
             ]
+          }
+        }
+      },
+      "StatusSyncResponse": {
+        "type": "object",
+        "description": "同步狀態查詢回應。",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "各 tenant × entity 的同步狀態清單。",
+            "items": {
+              "$ref": "#/components/schemas/StatusSyncItem"
+            }
+          }
+        }
+      },
+      "StatusSyncItem": {
+        "type": "object",
+        "description": "單一 tenant × entity 的同步狀態。",
+        "required": ["tenant_id", "entity", "status"],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "description": "Xero tenant ID。"
+          },
+          "entity": {
+            "type": "string",
+            "description": "實體名稱（invoices、contacts、accounts、creditnotes、payments）。"
+          },
+          "cursor_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "增量同步水位（UTC）；首次同步前可能為 null。"
+          },
+          "last_run_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "最後一次同步執行時間（UTC）；從未執行過則為 null。"
+          },
+          "status": {
+            "type": "string",
+            "description": "同步狀態（running、ok、failed）。"
+          }
+        }
+      },
+      "StatusJobsResponse": {
+        "type": "object",
+        "description": "同步佇列統計回應。",
+        "required": ["pending", "processing", "failed", "total"],
+        "properties": {
+          "pending": {
+            "type": "integer",
+            "description": "待處理的 job 筆數。"
+          },
+          "processing": {
+            "type": "integer",
+            "description": "處理中的 job 筆數。"
+          },
+          "failed": {
+            "type": "integer",
+            "description": "失敗的 job 筆數。"
+          },
+          "total": {
+            "type": "integer",
+            "description": "全部 job 筆數（pending + processing + failed）。"
+          }
+        }
+      },
+      "StatusTenantsResponse": {
+        "type": "object",
+        "description": "Tenant 狀態與 rate limit 配額回應。",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "全部 tenant 清單。",
+            "items": {
+              "$ref": "#/components/schemas/StatusTenantItem"
+            }
+          }
+        }
+      },
+      "StatusTenantItem": {
+        "type": "object",
+        "description": "單一 tenant 的狀態與 rate limit 配額。",
+        "required": ["tenant_id", "tenant_name", "auth_status"],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "description": "Xero tenant ID。"
+          },
+          "tenant_name": {
+            "type": "string",
+            "description": "Tenant 名稱（Xero 組織名稱）。"
+          },
+          "auth_status": {
+            "type": "string",
+            "description": "授權狀態（active、expired、revoked）。"
+          },
+          "token_expiry": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Access token 過期時間（UTC）；尚未授權則為 null。"
+          },
+          "day_limit_remaining": {
+            "type": "integer",
+            "description": "剩餘每日配額（per tenant）；尚未收到 Xero response 則為 null。"
+          },
+          "minute_limit_remaining": {
+            "type": "integer",
+            "description": "剩餘每分鐘配額（per tenant）；尚未收到 Xero response 則為 null。"
+          },
+          "app_minute_limit_remaining": {
+            "type": "integer",
+            "description": "剩餘全 app 每分鐘配額（跨所有 tenant）；尚未收到 Xero response 則為 null。"
+          },
+          "rate_limit_snapshot_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Rate limit 快照時間（UTC）；尚未收到 Xero response 則為 null。"
+          },
+          "last_sync_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "最後一次成功同步時間（UTC）；從未同步過則為 null。"
+          }
+        }
+      },
+      "StatusWebhooksResponse": {
+        "type": "object",
+        "description": "Webhook 事件統計回應。",
+        "required": ["pending", "processed", "total"],
+        "properties": {
+          "pending": {
+            "type": "integer",
+            "description": "待處理的事件筆數（processed_at IS NULL）。"
+          },
+          "processed": {
+            "type": "integer",
+            "description": "已處理的事件筆數（processed_at IS NOT NULL）。"
+          },
+          "total": {
+            "type": "integer",
+            "description": "全部事件筆數。"
           }
         }
       }

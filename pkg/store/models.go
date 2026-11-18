@@ -13,6 +13,18 @@ type Tenant struct {
 	AuthStatus      string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// Rate limit 快照；舊 tenant 可能還沒有這些資料，故用 pointer。
+	DayLimitRemaining       *int
+	MinuteLimitRemaining    *int
+	AppMinuteLimitRemaining *int
+	RateLimitSnapshotAt     *time.Time
+}
+
+// RateLimitInfo 是 Xero API 的 rate limit 剩餘配額。
+type RateLimitInfo struct {
+	DayLimitRemaining       int
+	MinuteLimitRemaining    int
+	AppMinuteLimitRemaining int
 }
 
 // DB row: sync_state；cursor_time 是增量水位，與資料 upsert 同交易提交。

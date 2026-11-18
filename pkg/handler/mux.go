@@ -6,20 +6,23 @@ import (
 	"net/http"
 )
 
-// NewMux 註冊 webhook／health／admin 與介紹頁／Swagger UI／OpenAPI；
+// NewMux 註冊 webhook／health／status 與介紹頁／Swagger UI／OpenAPI；
 // 非允許方法由各 Handler 回 405，未知路徑由 PageHandler 的 catch-all 回 404。
-func NewMux(webhook *WebhookHandler, health *HealthHandler, admin *AdminHandler, page *PageHandler) *http.ServeMux {
+func NewMux(webhook *WebhookHandler, health *HealthHandler, status *StatusHandler, page *PageHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook", webhook.Handle)
 	mux.HandleFunc("/health", health.Handle)
-	mux.HandleFunc("/admin/sync", admin.Handle)
+	mux.HandleFunc("/api/status/sync", status.HandleSync)
+	mux.HandleFunc("/api/status/jobs", status.HandleJobs)
+	mux.HandleFunc("/api/status/tenants", status.HandleTenants)
+	mux.HandleFunc("/api/status/webhooks", status.HandleWebhooks)
 	mux.HandleFunc("/", page.Handle)
-	mux.HandleFunc("/docs", page.Handle)
+	mux.HandleFunc("/swagger", page.Handle)
 	mux.HandleFunc("/openapi.json", page.Handle)
 	return mux
 }
 
-// writeJSON 寫入 JSON 回應；輸出皆為 map[string]string，編碼不會失敗。
+// writeJSON 寫入 JSON 回應；v 為可序列化物件，編碼失敗只記錄不中斷。
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)

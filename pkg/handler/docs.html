@@ -5,42 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>API 文件 — xero-mirror</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
-<body class="bg-white font-sans text-[#1f2328]">
-
-  <header class="border-b border-[#d1d9e0] bg-white">
-    <div class="mx-auto flex h-16 max-w-5xl items-center justify-between px-6">
-      <a href="/" class="flex items-center gap-2">
-        <span class="rounded-md bg-[#1f2328] px-2 py-0.5 font-mono text-xs text-white">xm</span>
-        <span class="text-[15px] font-semibold">xero-mirror</span>
-        <span class="hidden text-sm font-normal text-[#59636e] sm:inline">Xero → MySQL</span>
-      </a>
-      <nav class="flex items-center gap-1 text-sm">
-        <a href="/" class="rounded-md px-2.5 py-1.5 text-[#59636e] hover:bg-[#f6f8fa] hover:text-[#0969da]">首頁</a>
-        <a href="/docs" aria-current="page" class="rounded-md bg-[#f6f8fa] px-2.5 py-1.5 font-medium text-[#1f2328]">API 文件</a>
-        <a href="/openapi.json" class="rounded-md px-2.5 py-1.5 text-[#59636e] hover:bg-[#f6f8fa] hover:text-[#0969da]">OpenAPI</a>
-        <a href="/health" class="rounded-md px-2.5 py-1.5 text-[#59636e] hover:bg-[#f6f8fa] hover:text-[#0969da]">健康檢查</a>
-      </nav>
-    </div>
-  </header>
-
-  <div class="mx-auto max-w-6xl px-6 pt-6">
-    <div class="rounded-lg border border-[#d1d9e0] bg-white p-4 text-sm text-[#59636e]">
-      以下文件由 <code class="rounded bg-[#f6f8fa] px-1 py-0.5 font-mono text-xs text-[#1f2328]">/openapi.json</code> 即時載入；<code class="rounded bg-[#f6f8fa] px-1 py-0.5 font-mono text-xs text-[#1f2328]">/admin/sync</code> 無內建認證，只可部署於內網或反向代理後方。<code class="rounded bg-[#f6f8fa] px-1 py-0.5 font-mono text-xs text-[#1f2328]">Try it out</code> 僅開放 GET 端點，POST 端點（<code class="rounded bg-[#f6f8fa] px-1 py-0.5 font-mono text-xs text-[#1f2328]">/webhook</code>、<code class="rounded bg-[#f6f8fa] px-1 py-0.5 font-mono text-xs text-[#1f2328]">/admin/sync</code>）不會送出請求，避免誤觸同步。
-    </div>
-  </div>
-
+<body>
+  <div id="swagger-ui"></div>
   <noscript>
-    <div class="mx-auto max-w-6xl px-6 pt-4">
-      <div class="rounded-lg border border-[#d1d9e0] bg-[#f6f8fa] p-4 text-sm text-[#59636e]">
-        此頁需要啟用 JavaScript，並可連外網載入 CDN 資源（swagger-ui-dist）才能顯示 API 文件。
-      </div>
-    </div>
+    <p style="padding: 20px; color: #59636e; font-size: 14px;">
+      此頁需要啟用 JavaScript，並可連外網載入 CDN 資源（swagger-ui-dist）才能顯示 API 文件。
+    </p>
   </noscript>
-
-  <div id="swagger-ui" class="mx-auto max-w-6xl px-6 py-6"></div>
-
   <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script>
     window.addEventListener('DOMContentLoaded', function () {

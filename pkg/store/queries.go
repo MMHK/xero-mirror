@@ -29,14 +29,22 @@ WHERE tenant_id = ?`
 const updateTenantAuthStatusSQL = `
 UPDATE xero_tenants SET auth_status = ?, updated_at = ? WHERE tenant_id = ?`
 
+const updateTenantRateLimitSQL = `
+UPDATE xero_tenants
+SET day_limit_remaining = ?, minute_limit_remaining = ?, app_minute_limit_remaining = ?,
+    rate_limit_snapshot_at = ?, updated_at = ?
+WHERE tenant_id = ?`
+
 const selectTenantSQL = `
 SELECT tenant_id, tenant_name, access_token_enc, refresh_token_enc, token_expiry,
-	scopes, auth_status, created_at, updated_at
+	scopes, auth_status, created_at, updated_at,
+	day_limit_remaining, minute_limit_remaining, app_minute_limit_remaining, rate_limit_snapshot_at
 FROM xero_tenants WHERE tenant_id = ?`
 
 const listTenantsSQL = `
 SELECT tenant_id, tenant_name, access_token_enc, refresh_token_enc, token_expiry,
-	scopes, auth_status, created_at, updated_at
+	scopes, auth_status, created_at, updated_at,
+	day_limit_remaining, minute_limit_remaining, app_minute_limit_remaining, rate_limit_snapshot_at
 FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id`
 
 const deleteTenantSQL = `DELETE FROM xero_tenants WHERE tenant_id = ?`
@@ -242,12 +250,25 @@ func (s *Store) UpdateTenantAuthStatus(ctx context.Context, tx *sql.Tx, tenantID
 	return nil
 }
 
+// UpdateTenantRateLimit 更新 tenant 的 rate limit 快照；不更新 token 或其他欄位。
+func (s *Store) UpdateTenantRateLimit(ctx context.Context, tenantID string, info RateLimitInfo) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, updateTenantRateLimitSQL,
+		info.DayLimitRemaining, info.MinuteLimitRemaining, info.AppMinuteLimitRemaining,
+		now, now, tenantID)
+	if err != nil {
+		return fmt.Errorf("更新 tenant %s rate limit: %w", tenantID, err)
+	}
+	return nil
+}
+
 // GetTenant 讀取單一 tenant；找不到回 sql.ErrNoRows。
 func (s *Store) GetTenant(ctx context.Context, tenantID string) (Tenant, error) {
 	var t Tenant
 	err := s.db.QueryRowContext(ctx, selectTenantSQL, tenantID).Scan(
 		&t.TenantID, &t.TenantName, &t.AccessTokenEnc, &t.RefreshTokenEnc, &t.TokenExpiry,
-		&t.Scopes, &t.AuthStatus, &t.CreatedAt, &t.UpdatedAt)
+		&t.Scopes, &t.AuthStatus, &t.CreatedAt, &t.UpdatedAt,
+		&t.DayLimitRemaining, &t.MinuteLimitRemaining, &t.AppMinuteLimitRemaining, &t.RateLimitSnapshotAt)
 	if err != nil {
 		return Tenant{}, fmt.Errorf("查詢 tenant %s: %w", tenantID, err)
 	}
@@ -268,7 +289,8 @@ func (s *Store) ListTenants(ctx context.Context) ([]Tenant, error) {
 		var t Tenant
 		if err := rows.Scan(
 			&t.TenantID, &t.TenantName, &t.AccessTokenEnc, &t.RefreshTokenEnc, &t.TokenExpiry,
-			&t.Scopes, &t.AuthStatus, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.Scopes, &t.AuthStatus, &t.CreatedAt, &t.UpdatedAt,
+			&t.DayLimitRemaining, &t.MinuteLimitRemaining, &t.AppMinuteLimitRemaining, &t.RateLimitSnapshotAt); err != nil {
 			return nil, fmt.Errorf("讀取 tenant: %w", err)
 		}
 		tenants = append(tenants, t)
@@ -529,4 +551,138 @@ func (s *Store) UpsertSyncStateWithoutTx(ctx context.Context, st SyncState) erro
 		return fmt.Errorf("upsert sync_state %s/%s: %w", st.TenantID, st.Entity, err)
 	}
 	return nil
+}
+
+const listSyncStatesSQL = `
+SELECT tenant_id, entity, cursor_time, last_run_at, status, last_error
+FROM sync_state
+WHERE (? = '' OR tenant_id = ?) AND (? = '' OR entity = ?)
+ORDER BY tenant_id, entity`
+
+// ListSyncStates 列出同步狀態，支援 tenant 與 entity 過濾；空字串代表不過濾。
+func (s *Store) ListSyncStates(ctx context.Context, tenantFilter, entityFilter string) ([]SyncState, error) {
+	rows, err := s.db.QueryContext(ctx, listSyncStatesSQL, tenantFilter, tenantFilter, entityFilter, entityFilter)
+	if err != nil {
+		return nil, fmt.Errorf("查詢 sync_state 清單: %w", err)
+	}
+	defer rows.Close()
+
+	states := make([]SyncState, 0)
+	for rows.Next() {
+		var st SyncState
+		if err := rows.Scan(&st.TenantID, &st.Entity, &st.CursorTime, &st.LastRunAt, &st.Status, &st.LastError); err != nil {
+			return nil, fmt.Errorf("讀取 sync_state: %w", err)
+		}
+		states = append(states, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("讀取 sync_state 清單: %w", err)
+	}
+	return states, nil
+}
+
+const countSyncJobsByStatusSQL = `
+SELECT status, COUNT(*) FROM sync_jobs GROUP BY status`
+
+// CountSyncJobsByStatus 統計 sync_jobs 各狀態的筆數。
+func (s *Store) CountSyncJobsByStatus(ctx context.Context) (pending, processing, failed int, err error) {
+	rows, err := s.db.QueryContext(ctx, countSyncJobsByStatusSQL)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("統計 sync_jobs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return 0, 0, 0, fmt.Errorf("讀取 sync_jobs 統計: %w", err)
+		}
+		switch status {
+		case "pending":
+			pending = count
+		case "processing":
+			processing = count
+		case "failed":
+			failed = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, 0, fmt.Errorf("讀取 sync_jobs 統計: %w", err)
+	}
+	return pending, processing, failed, nil
+}
+
+const listAllTenantsSQL = `
+SELECT tenant_id, tenant_name, auth_status, token_expiry,
+	day_limit_remaining, minute_limit_remaining, app_minute_limit_remaining, rate_limit_snapshot_at
+FROM xero_tenants ORDER BY tenant_id`
+
+// ListAllTenants 列出全部 tenant（不限 auth_status），供 status API 使用；不查詢敏感欄位（token 密文、scopes）。
+func (s *Store) ListAllTenants(ctx context.Context) ([]Tenant, error) {
+	rows, err := s.db.QueryContext(ctx, listAllTenantsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("查詢全部 tenant 清單: %w", err)
+	}
+	defer rows.Close()
+
+	tenants := make([]Tenant, 0)
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(
+			&t.TenantID, &t.TenantName, &t.AuthStatus, &t.TokenExpiry,
+			&t.DayLimitRemaining, &t.MinuteLimitRemaining, &t.AppMinuteLimitRemaining, &t.RateLimitSnapshotAt); err != nil {
+			return nil, fmt.Errorf("讀取 tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("讀取全部 tenant 清單: %w", err)
+	}
+	return tenants, nil
+}
+
+const lastSyncAtByTenantSQL = `
+SELECT tenant_id, MAX(last_run_at)
+FROM sync_state
+WHERE status = 'ok' AND last_run_at IS NOT NULL
+GROUP BY tenant_id`
+
+// GetLastSyncAtByTenant 查詢各 tenant 最後一次成功同步時間；回傳 map[tenantID]lastRunAt。
+func (s *Store) GetLastSyncAtByTenant(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, lastSyncAtByTenantSQL)
+	if err != nil {
+		return nil, fmt.Errorf("查詢 last_sync_at: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]time.Time)
+	for rows.Next() {
+		var tenantID string
+		var lastRunAt time.Time
+		if err := rows.Scan(&tenantID, &lastRunAt); err != nil {
+			return nil, fmt.Errorf("掃描 last_sync_at: %w", err)
+		}
+		result[tenantID] = lastRunAt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("迭代 last_sync_at: %w", err)
+	}
+	return result, nil
+}
+
+const countWebhookEventsSQL = `
+SELECT
+  IFNULL(SUM(CASE WHEN processed_at IS NULL THEN 1 ELSE 0 END), 0),
+  IFNULL(SUM(CASE WHEN processed_at IS NOT NULL THEN 1 ELSE 0 END), 0),
+  COUNT(*)
+FROM webhook_events`
+
+// CountWebhookEvents 統計 webhook_events 的 pending、processed 與總筆數。
+func (s *Store) CountWebhookEvents(ctx context.Context) (pending, processed, total int, err error) {
+	err = s.db.QueryRowContext(ctx, countWebhookEventsSQL).Scan(&pending, &processed, &total)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("統計 webhook_events: %w", err)
+	}
+	return pending, processed, total, nil
 }

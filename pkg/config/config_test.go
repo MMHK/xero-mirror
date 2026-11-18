@@ -123,3 +123,50 @@ func TestLoadLogLevel(t *testing.T) {
 		require.Equal(t, slog.LevelInfo, cfg.LogLevel)
 	})
 }
+
+// TestParseSwaggerEnabled 驗證 SWAGGER_ENABLED 解析：大小寫不敏感、去空白、非法值報錯。
+func TestParseSwaggerEnabled(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{"空字串預設關閉", "", false, false},
+		{"true", "true", true, false},
+		{"大寫 TRUE", "TRUE", true, false},
+		{"去空白 true", " true ", true, false},
+		{"false", "false", false, false},
+		{"大寫 FALSE", "FALSE", false, false},
+		{"非法值 yes", "yes", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSwaggerEnabled(tc.raw)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "SWAGGER_ENABLED")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestLoadSwaggerEnabled 驗證 Load 確實接上 SWAGGER_ENABLED：true 開啟、未設定預設關閉。
+func TestLoadSwaggerEnabled(t *testing.T) {
+	t.Run("true 開啟", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("SWAGGER_ENABLED", "true")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.True(t, cfg.SwaggerEnabled)
+	})
+	t.Run("未設定預設關閉", func(t *testing.T) {
+		setValidEnv(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.False(t, cfg.SwaggerEnabled)
+	})
+}
