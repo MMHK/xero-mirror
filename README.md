@@ -45,6 +45,8 @@ go build -o xero-mirror.exe .
 
 ## Docker 建構
 
+### 本機建構
+
 ```bash
 # 建構 image
 docker compose build                    # 透過 compose 建構（含 MySQL）
@@ -57,12 +59,26 @@ docker compose up -d                    # 同時啟動 MySQL + app
 docker run --rm mmhk/xero-mirror auth
 docker run --rm mmhk/xero-mirror serve
 docker run --rm mmhk/xero-mirror sync --month 2026-05
-
-# 推送至 registry
-docker push mmhk/xero-mirror:latest
 ```
 
 Compose 啟動時，app 會自動等待 MySQL 健康後才啟動，並使用 Docker 內部網路連線（`mysql:3306`）。
+
+### 自動建構（CI/CD）
+
+Push semver tag 時，GitHub Actions 會自動建構 multi-arch image 並推送 Docker Hub：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+產出：
+- `mmhk/xero-mirror:v1.0.0`（multi-arch manifest）
+- `mmhk/xero-mirror:v1.0.0-amd64`
+- `mmhk/xero-mirror:v1.0.0-arm64`
+- `mmhk/xero-mirror:latest`（multi-arch manifest）
+
+支援 `linux/amd64` 與 `linux/arm64`。需要設定 GitHub Secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`。
 
 ## Web 介面
 

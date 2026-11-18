@@ -211,3 +211,41 @@ docker compose -f docker-compose.test.yml down
 - `AGENTS.md` §10：指令與測試規則
 - `doc/spec.md` §8：環境變數
 - `pkg/store/migrations/`：schema 定義
+
+## CI/CD（GoReleaser）
+
+Push semver tag（`v*`）時，GitHub Actions 會自動建構 multi-arch Docker image 並推送 Docker Hub。
+
+### 本機測試 GoReleaser
+
+需先安裝 [GoReleaser](https://goreleaser.com/install/)：
+
+```bash
+# 檢查設定是否正確
+goreleaser check
+
+# 模擬建構（不推送，產出在 dist/）
+goreleaser release --snapshot --clean
+
+# 只建構單一平台（較快）
+goreleaser build --single-target --snapshot --clean
+```
+
+建構產物在 `dist/` 目錄（已 gitignore）：
+- `dist/xero-mirror_linux_amd64/xero-mirror`
+- `dist/xero-mirror_linux_arm64/xero-mirror`
+- `dist/checksums.txt`
+- `dist/*.tar.gz`
+
+### 觸發正式建構
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+需要設定 GitHub Secrets：
+- `DOCKERHUB_USERNAME`：Docker Hub 帳號
+- `DOCKERHUB_TOKEN`：Docker Hub Access Token
+
+詳細設計見 `doc/plans/2026-11-18-goreleaser-ci.md`。
