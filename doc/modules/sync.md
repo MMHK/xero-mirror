@@ -66,7 +66,7 @@ Runner.Run
 | 觸發 | Window | `trackCursor` | 水位行為 |
 |------|--------|---------------|----------|
 | `sync`（無 `--month`）／cron | `Cursor`（`nil` = 首跑全量） | true | `Batch.Cursor` = 本批最大 `xero_updated_at` - 1 秒 |
-| `sync --month`／`POST /admin/sync?month=` | `MonthStart`／`MonthEnd`（UTC 半開） | false | `Batch.Cursor` 保持 `nil` |
+| `sync --month` | `MonthStart`／`MonthEnd`（UTC 半開） | false | `Batch.Cursor` 保持 `nil` |
 | webhook buffer flush | 批量 IDs | false | `Batch.Cursor` 保持 `nil` |
 
 `trackCursor` 在 `Run` 內以 `w.MonthStart == nil` 決定，`RunBatch` 固定 `false`。`nil` 水位由 `pkg/store/queries.go` 的 `upsertSyncStateSQL` 保護，語意是「不動」而非「清空」：
@@ -169,7 +169,6 @@ SELECT ... FROM xero_tenants WHERE auth_status = 'active' ORDER BY tenant_id
 | `sync --month YYYY-MM` | `runSync` → `syncWindow` 組 UTC 半開區間 | `RunAllMonth` |
 | `sync --entity NAME` | `runSync` → `parseSyncEntity` → `runSyncMode` | `RunEntityIncremental`／`RunEntityMonth` |
 | cron | `commands.go` `runCronSync` | `RunAllIncremental` |
-| `POST /admin/sync` | `pkg/handler` `AdminHandler` | `Run`（單 tenant／entity） |
 | `POST /webhook` | `pkg/handler` `WebhookHandler` → `WebhookBuffer` | `RunBatch`（僅 Invoices／Contacts） |
 
 ## 9. 指令與測試入口

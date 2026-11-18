@@ -128,7 +128,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 表 | 主鍵 | Xero 端點 | 關鍵欄位 |
 |----|------|-----------|----------|
 | `schema_migrations` | `version`（`varchar(64)`） | — | `applied_at`（`DATETIME(6)`）；系統表，由 `store.Migrate` 建立與維護，**不算業務表** |
-| `xero_tenants` | `tenant_id` | — | `tenant_name`、`access_token_enc`、`refresh_token_enc`、`token_expiry`、`scopes`、`auth_status`、`updated_at` |
+| `xero_tenants` | `tenant_id` | — | `tenant_name`、`access_token_enc`、`refresh_token_enc`、`token_expiry`、`scopes`、`auth_status`、`day_limit_remaining`、`minute_limit_remaining`、`app_minute_limit_remaining`、`rate_limit_snapshot_at`、`updated_at` |
 | `sync_state` | `(tenant_id, entity)` | — | `cursor_time`、`last_run_at`、`status`、`last_error` |
 | `webhook_events` | `event_id` | — | `tenant_id`、`entity`、`xero_id`、`event_date`、`received_at`、`processed_at` |
 | `sync_jobs` | `id`（自增） | — | `tenant_id`、`entity`、`xero_id`、`reason`、`status`、`created_at`、`finished_at` |
@@ -183,6 +183,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 必要 header | `Authorization: Bearer <accessToken>` ＋ `Xero-tenant-id: <tenantID>`；header 缺失先懷疑 tenant 綁定，不要直接判定 token 過期 |
 | 分頁 | 依端點能力（見下表）；支援者 `page=1..N`、每頁 100，直到回傳 < 100 或空陣列；`/Accounts` 不分頁，單次回傳全部；一律不假設總頁數 |
 | 限流 | per-tenant：5 併發、約 60 次/分（`golang.org/x/time/rate`），**另**有每日呼叫上限（值由 config 決定，不硬編碼）；**禁**全域 fan-out |
+| 配額快照 | 每個 Xero response 的 `X-DayLimit-Remaining`／`X-MinLimit-Remaining`／`X-AppMinLimit-Remaining` 由 client 解析後非同步寫入 `xero_tenants` 的 rate limit 欄位（`-1` 表缺值），供 `/api/status/tenants` 查詢 |
 | 429 | 讀 `Retry-After` 退避重試；屬預期狀況，不算錯誤告警 |
 | timeout | 對外請求一律帶 `context.Context` 與 timeout，禁無 timeout client |
 | 增量 | 優先 `If-Modified-Since` 或 `where=UpdatedAtUTC>...`（支援度依端點，見下表），實際水位寫進 `sync_state.cursor_time` |
@@ -324,7 +325,7 @@ type SyncJobQueue struct {
 | `GET` | `/api/status/sync` | 同步狀態 | 查詢各 tenant × entity 的 `sync_state`；可選 `tenant`／`entity` 查詢參數過濾 |
 | `GET` | `/api/status/jobs` | 同步佇列統計 | 回傳 `sync_jobs` 的 pending／processing／failed／total 計數 |
 | `GET` | `/api/status/tenants` | Tenant 狀態 | 合併 tenant 資訊（`auth_status`、`token_expiry`）與 rate limit 快照（`day_limit_remaining` 等） |
-| `GET` | `/api/status/webhooks` | Webhook 事件統計 | 回傳 `webhook_events` 的 pending／processed／failed／total 計數 |
+| `GET` | `/api/status/webhooks` | Webhook 事件統計 | 回傳 `webhook_events` 的 pending／processed／total 計數（`processed_at` 為 `NULL` 即 pending） |
 
 - 本服務端點**只允許** `GET`／`POST`；其他方法（`PUT`／`PATCH`／`DELETE`）一律回 `405 Method Not Allowed`，並帶 `Allow` header 標示允許的方法；未知路徑回 `404`。
 - `/health` 只做 `store.Ping`：成功回 JSON `{"status":"ok"}`，失敗先 `slog.Warn` 再回 `{"status":"unhealthy"}`。

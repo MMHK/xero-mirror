@@ -51,7 +51,7 @@ repo 已有完整 scaffold、migration、store、xero client、sync 核心、web
 │   ├── store/           # repository：手寫 SQL（唯一碰 SQL 的層）+ 內嵌 migration
 │   │   └── migrations/  # 內嵌 DDL（NNN_name.up.sql / NNN_name.down.sql，經 //go:embed 打包）
 │   ├── sync/            # 實體同步編排：cursor、月度視窗、冪等 upsert
-│   └── handler/         # webhook 接收、health、admin 手動觸發
+│   └── handler/         # webhook 接收、health、status 查詢、頁面／Swagger UI
 ├── scripts/             # Docker 初始化腳本（init-dev.sql 等）
 ├── tests/               # 測試工具（TestLogger、DB fixture、mock client）
 ├── doc/
@@ -125,7 +125,7 @@ repo 已有完整 scaffold、migration、store、xero client、sync 核心、web
 - 時間一律 `time.Time` + UTC 入庫；Xero 部分端點回 `/Date(1234567890000+0000)/`，必須顯式解析（毫秒 + 時區偏移），不可丟給 RFC3339。
 - 所有對外 HTTP 請求帶 `context.Context` 與 timeout；禁止無 timeout 的 client。
 
-### HTTP 端點（webhook / admin）
+### HTTP 端點（webhook / health / status / 頁面）
 - 只允許 `GET`、`POST`；`PUT/PATCH/DELETE` 禁止。此限制只針對**本服務自己提供**的端點；呼叫 Xero API 時照 Xero 要求（例如註冊 webhook 是 `PUT /webhooks`）。
 - 變更用 `POST /xxx/update`、刪除用 `POST /xxx/delete` 動作路徑。
 - Handler 只做參數解析、驗證、回 200/4xx，業務邏輯放 `pkg/sync`。

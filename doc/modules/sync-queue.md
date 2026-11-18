@@ -124,7 +124,7 @@ CREATE TABLE failed_sync_jobs (
 **用途**：
 - 儲存失敗的 job，供除錯與未來重試
 - 不設 UNIQUE KEY，允許同一資源多次失敗
-- 可由 admin endpoint 手動重新插入 `sync_jobs`
+- 預留作人工除錯與後續重試用途（目前無 web 入口可重新插入 `sync_jobs`）
 
 ## 6. 配置參數
 
@@ -148,7 +148,7 @@ CREATE TABLE failed_sync_jobs (
 **解法**：
 - cron 增量同步會靠 cursor 水位補抓遺漏的資料
 - 失敗的 job 可在 `failed_sync_jobs` 查詢錯誤原因
-- 未來可擴充：admin endpoint 手動從 `failed_sync_jobs` 重新插入 `sync_jobs`
+- 未來可擴充：人工從 `failed_sync_jobs` 重新插入 `sync_jobs`
 
 ### 7.3 同一個 entry 的多次變更
 

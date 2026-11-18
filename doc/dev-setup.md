@@ -66,7 +66,7 @@ go build -o xero-mirror.exe .
 # 首次授權（會印出授權 URL，請手動在瀏覽器開啟）
 ./xero-mirror.exe auth
 
-# 啟動常駐服務（cron + webhook + admin）
+# 啟動常駐服務（cron + webhook）
 ./xero-mirror.exe serve
 ```
 

@@ -99,8 +99,7 @@
 **實作方式**：
 1. 擴充 `xero_tenants` 表，新增 4 個欄位儲存 rate limit 快照
 2. `pkg/xero` client 每次收到 Xero response 時，解析這 3 個 header，非同步更新該 tenant 的欄位
-3. callback 在 `buildRunner` 內部設定，確保 `sync` 和 `serve` 模式都能收集
-4. `/api/status/tenants` 直接從 `xero_tenants` 讀取
+3. `/api/status/tenants` 直接從 `xero_tenants` 讀取
 
 **回應範例**：
 ```json
@@ -159,10 +158,10 @@
 | 8 | 更新 `openapi.json`：移除 `/admin/sync`，新增 4 個 status API，更新 `/swagger` | ✅ 完成 | |
 | 9 | 新增 `pkg/handler/status.go`：實作 4 個 status handler | ✅ 完成 | 需要注入 store |
 | 10 | 更新 `pkg/handler/mux.go`：註冊 `/api/status/*` 路由 | ✅ 完成 | |
-| 11 | 更新 `commands.go`：調整 `buildServeDeps` 的 handler 建構 | ✅ 完成 | `buildRunner` 改為回傳 `(*sync.Runner, error)`，rate limit callback 在內部設定 |
+| 11 | 更新 `commands.go`：調整 `buildServeDeps` 的 handler 建構 | ✅ 完成 | |
 | 12 | 更新 `.env.example`：新增 `SWAGGER_ENABLED` | ✅ 完成 | |
 | 13 | 更新 `doc/spec.md` 路由相關段落 | ✅ 完成 | |
-| 14 | Code Review | ✅ 完成 | 已修正 `last_sync_at`、`CountWebhookEvents` NULL scan、`ListAllTenants` 敏感欄位、rate limit callback 設定位置 |
+| 14 | Code Review | ✅ 完成 | 已修正 `last_sync_at`、`CountWebhookEvents` NULL scan、`ListAllTenants` 敏感欄位 |
 
 ---
 
@@ -179,11 +178,6 @@
 
 | 日期 | Reviewer | 發現 | 處理方式 |
 |------|----------|------|----------|
-| 2026-11-18 | AI Code Reviewer | `last_sync_at` 欄位缺失 | 新增 `GetLastSyncAtByTenant` store 方法 |
-| 2026-11-18 | AI Code Reviewer | `CountWebhookEvents` 空表時 SUM 回 NULL → Scan 失敗 | SQL 改用 `IFNULL` 包裝 |
-| 2026-11-18 | AI Code Reviewer | `ListAllTenants` 查詢了不需要的敏感欄位 | 改為只查 status API 需要的欄位 |
-| 2026-11-18 | AI Code Reviewer | `writeJSON` 註解過時 | 更新註解 |
-| 2026-11-18 | 使用者 | Rate limit callback 只在 `serve` 模式有設定，`sync` 模式不會收集 | 將 callback 設定移到 `buildRunner` 內部 |
 
 ---
 
@@ -221,7 +215,6 @@ ALTER TABLE xero_tenants
 
 - 不新建表，直接擴充現有 `xero_tenants`
 - 每次 `pkg/xero` client 收到 Xero response 時，非同步更新該 tenant 的 4 個欄位
-- callback 在 `buildRunner` 內部設定，確保 `sync` 和 `serve` 模式都能收集
 - `/api/status/tenants` 從 `xero_tenants` 讀取，一次回傳 tenant 資訊 + rate limit 剩餘量
 
 ### 不變更的部分
