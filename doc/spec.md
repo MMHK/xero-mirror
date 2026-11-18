@@ -182,7 +182,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ❌ 不支援 | 無批量參數，只能逐個或全量；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since` 與月度 `Date` 過濾 |
 | `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since` 與月度 `Date` 過濾 |
 | `GET /Contacts` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 無 `Date` 欄位，改用 `UpdatedDateUTC` 進行月度過濾 |
-| `GET /Accounts` | 不分頁（單次回傳全部） | `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)` | ❌ 不支援 | 無 `Date` 欄位，改用 `UpdatedDateUTC` 進行月度過濾；不分頁但可下 where 條件 |
+| `GET /Accounts` | 不分頁（單次回傳全部） | Cursor 模式：全量（不支援 `If-Modified-Since`）；Month 模式：`where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)` | ❌ 不支援 | 無 `Date` 欄位，月度過濾改用 `UpdatedDateUTC`；Xero API 不支援此端點的 `If-Modified-Since`，cursor 增量退化为全量 |
 
 **預設規則**：矩陣中標「未啟用」或尚未核對的能力，一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。
 
