@@ -39,11 +39,11 @@ func TestMigrateIdempotent(t *testing.T) {
 	require.Equal(t, len(upFiles), second, "重跑 migrate 不得新增版本")
 }
 
-// dropAllTables 清空測試庫的 10 張表，讓測試可重複執行。
+// dropAllTables 清空測試庫的 11 張表，讓測試可重複執行。
 func dropAllTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 	tables := []string{
-		"schema_migrations", "xero_tenants", "sync_state", "webhook_events", "sync_jobs",
+		"schema_migrations", "xero_tenants", "sync_state", "webhook_events", "sync_jobs", "failed_sync_jobs",
 		"xero_contacts", "xero_accounts", "xero_invoices", "xero_credit_notes", "xero_payments",
 	}
 	for _, table := range tables {

@@ -33,7 +33,7 @@ func setupLogging(level slog.Level) {
 // readHeaderTimeout 是 HTTP server 讀請求 header 的上限，避免無 timeout 的常駐 server。
 const readHeaderTimeout = 10 * time.Second
 
-// shutdownTimeout 是優雅關機流程的總等待上限，cron／HTTP server／buffer 關閉共用同一預算。
+// shutdownTimeout 是優雅關機流程的總等待上限，cron／HTTP server／queue 關閉共用同一預算。
 const shutdownTimeout = 30 * time.Second
 
 // runSync 依 --month／--entity 走月度回補或 cursor 增量：載入設定、連上 MySQL 後跑全部 tenant。
@@ -147,20 +147,18 @@ func buildRunner(cfg *config.Config, st *store.Store) (*sync.Runner, error) {
 	return sync.NewRunner(client, st), nil
 }
 
-// serveDeps 集中 serve 啟動後需要一起關閉的資源；cancelCron／cancelBuf 控制兩條
-// 獨立於 signal ctx 的生命週期，避免關機信號一到就讓在飛同步與最後 flush 失效。
+// serveDeps 集中 serve 啟動後需要一起關閉的資源；cancelCron 控制獨立於 signal ctx
+// 的生命週期，避免關機信號一到就讓在飛同步失效。
 type serveDeps struct {
 	db         *sql.DB
-	buf        *handler.WebhookBuffer
-	singleBuf  *handler.SingleGetBuffer
+	queue      *handler.SyncJobQueue
 	srv        *http.Server
 	cron       *cron.Cron
 	cancelCron context.CancelFunc
-	cancelBuf  context.CancelFunc
 }
 
 // runServe 載入設定、接線 cron + webhook + 健康檢查並常駐，收到 ctx 取消後依序優雅關閉。
-// cron 與 buffer 各自使用獨立於 signal ctx 的 context，確保關機流程仍能控制取消時機。
+// cron 與 queue 使用獨立於 signal ctx 的 context，確保關機流程仍能控制取消時機。
 func runServe(ctx context.Context, _ []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -169,10 +167,10 @@ func runServe(ctx context.Context, _ []string) error {
 	setupLogging(cfg.LogLevel)
 	// 兩者皆派生自 context.Background()，不隨 signal ctx 連動；取消時機由 shutdown 掌控。
 	cronCtx, cancelCron := context.WithCancel(context.Background())
-	bufCtx, cancelBuf := context.WithCancel(context.Background())
+	queueCtx, cancelQueue := context.WithCancel(context.Background())
 	defer cancelCron()
-	defer cancelBuf()
-	deps, err := buildServeDeps(ctx, cfg, cronCtx, bufCtx, cancelCron, cancelBuf)
+	defer cancelQueue()
+	deps, err := buildServeDeps(ctx, cfg, cronCtx, queueCtx, cancelCron)
 	if err != nil {
 		return err
 	}
@@ -180,9 +178,9 @@ func runServe(ctx context.Context, _ []string) error {
 }
 
 // buildServeDeps 連線、migration 並組出 serve 所需的全部元件；失敗時關閉已建立資源。
-// cronCtx 供 cron 同步使用、bufCtx 作為 buffer flush 的基底，兩者皆不隨 signal ctx 取消。
-func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx context.Context,
-	cancelCron, cancelBuf context.CancelFunc) (*serveDeps, error) {
+// cronCtx 供 cron 同步使用、queueCtx 作為 SyncJobQueue 背景 goroutine 的基底，兩者皆不隨 signal ctx 取消。
+func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx context.Context,
+	cancelCron context.CancelFunc) (*serveDeps, error) {
 	db, err := store.OpenMigrated(ctx, cfg.MySQLDSN)
 	if err != nil {
 		return nil, fmt.Errorf("初始化資料庫失敗: %w", err)
@@ -194,10 +192,9 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx con
 		return nil, err
 	}
 
-	buf := handler.NewWebhookBuffer(bufCtx, runner, cfg.WebhookBufferSize, cfg.WebhookBufferDelay)
-	singleBuf := handler.NewSingleGetBuffer(bufCtx, runner, cfg.SingleBufferDelay)
+	queue := handler.NewSyncJobQueue(queueCtx, runner, st, cfg.SyncJobBatchSize, cfg.SyncJobPollInterval)
 	mux := handler.NewMux(
-		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey), buf, singleBuf),
+		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey)),
 		handler.NewHealthHandler(st),
 		handler.NewAdminHandler(runner, st),
 		handler.NewPageHandler(),
@@ -205,13 +202,12 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, bufCtx con
 	// SkipIfStillRunning：上一輪同步還在跑時跳過本輪，避免長同步與下一輪 cron 重疊。
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
 	if _, err := c.AddFunc(cfg.SyncCron, func() { runCronSync(cronCtx, runner) }); err != nil {
-		_ = singleBuf.Shutdown(context.Background())
-		_ = buf.Shutdown(context.Background())
+		_ = queue.Shutdown(context.Background())
 		_ = db.Close()
 		return nil, fmt.Errorf("註冊 cron 排程失敗: %w", err)
 	}
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
-	return &serveDeps{db: db, buf: buf, singleBuf: singleBuf, srv: srv, cron: c, cancelCron: cancelCron, cancelBuf: cancelBuf}, nil
+	return &serveDeps{db: db, queue: queue, srv: srv, cron: c, cancelCron: cancelCron}, nil
 }
 
 // serveLoop 啟動 cron 與 HTTP server，等待關機訊號或 server 錯誤後優雅關閉。
@@ -238,9 +234,9 @@ func serveLoop(ctx context.Context, deps *serveDeps) error {
 	return serveErr
 }
 
-// shutdown 依固定順序關閉：cron → HTTP server → webhook buffer → DB；
-// 全程以 shutdownTimeout 作為總等待上限，單步失敗只 Warn 續行，buffer 的最後 flush 不得被跳過。
-// cronCtx 只在等待 cron job 逾時後取消；bufCtx 保留到 buffer 最後 flush 完成後才取消。
+// shutdown 依固定順序關閉：cron → HTTP server → SyncJobQueue → DB；
+// 全程以 shutdownTimeout 作為總等待上限，單步失敗只 Warn 續行，queue 的當前任務不得被跳過。
+// cronCtx 只在等待 cron job 逾時後取消。
 func (d *serveDeps) shutdown() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -263,18 +259,12 @@ func (d *serveDeps) shutdown() {
 		slog.Info("HTTP server 已關閉")
 	}
 
-	// 此時 bufCtx 尚未取消，最後 flush 仍可正常執行；shutdownCtx 只控制等待上限。
-	if err := d.buf.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("webhook buffer 關閉失敗", "err", err)
+	// 等待當前處理中的 job 完成（或逾時）；shutdownCtx 只控制等待上限。
+	if err := d.queue.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("sync job queue 關閉失敗", "err", err)
 	} else {
-		slog.Info("webhook buffer 已關閉")
+		slog.Info("sync job queue 已關閉")
 	}
-	if err := d.singleBuf.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("single get buffer 關閉失敗", "err", err)
-	} else {
-		slog.Info("single get buffer 已關閉")
-	}
-	d.cancelBuf()
 
 	if err := d.db.Close(); err != nil {
 		slog.Warn("資料庫連線關閉失敗", "err", err)

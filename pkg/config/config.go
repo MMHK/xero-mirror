@@ -16,12 +16,10 @@ import (
 const (
 	// DefaultDailyCallLimit 是 XERO_DAILY_CALL_LIMIT 未設定時，每 tenant 的每日呼叫上限。
 	DefaultDailyCallLimit = 1000
-	// DefaultWebhookBufferSize 是 WEBHOOK_BUFFER_SIZE 未設定時的單群組 batch size。
-	DefaultWebhookBufferSize = 30
-	// DefaultWebhookBufferDelayMs 是 WEBHOOK_BUFFER_DELAY 未設定時的 flush delay（毫秒）。
-	DefaultWebhookBufferDelayMs = 3000
-	// DefaultSingleBufferDelayMs 是 SINGLE_BUFFER_DELAY 未設定時的 single get flush delay（毫秒）。
-	DefaultSingleBufferDelayMs = 5000
+	// DefaultSyncJobBatchSize 是 SYNC_JOB_BATCH_SIZE 未設定時的每次 poll 上限。
+	DefaultSyncJobBatchSize = 100
+	// DefaultSyncJobPollIntervalMs 是 SYNC_JOB_POLL_INTERVAL 未設定時的空閒等待時間（毫秒）。
+	DefaultSyncJobPollIntervalMs = 5000
 	// redirectPortMin、redirectPortMax 是 localhost callback 允許的 port 範圍。
 	redirectPortMin = 3000
 	redirectPortMax = 9000
@@ -50,12 +48,10 @@ type Config struct {
 	SyncCron       string
 	HTTPAddr       string
 	DailyCallLimit int
-	// WebhookBufferSize 是單一 (tenant, entity) 群組累積達此筆數即立即 flush。
-	WebhookBufferSize int
-	// WebhookBufferDelay 是收到首筆事件後的最長等待時間，到期即 flush。
-	WebhookBufferDelay time.Duration
-	// SingleBufferDelay 是 single get buffer 收到首筆事件後的延遲時間，到期後逐一抓取。
-	SingleBufferDelay time.Duration
+	// SyncJobBatchSize 是每次 poll 拉取的 sync_jobs 上限。
+	SyncJobBatchSize int
+	// SyncJobPollInterval 是佇列為空時的等待間隔。
+	SyncJobPollInterval time.Duration
 	// LogLevel 是全域日誌等級，由 LOG_LEVEL 解析；未設定時為 info。
 	LogLevel slog.Level
 }
@@ -94,9 +90,8 @@ func Load() (*Config, error) {
 		SyncCron:           env["SYNC_CRON"],
 		HTTPAddr:           env["HTTP_ADDR"],
 		DailyCallLimit:     opt.dailyCallLimit,
-		WebhookBufferSize:  opt.bufferSize,
-		WebhookBufferDelay: time.Duration(opt.bufferDelayMs) * time.Millisecond,
-		SingleBufferDelay:  time.Duration(opt.singleBufferDelayMs) * time.Millisecond,
+		SyncJobBatchSize:     opt.syncJobBatchSize,
+		SyncJobPollInterval:  time.Duration(opt.syncJobPollIntervalMs) * time.Millisecond,
 		LogLevel:           opt.logLevel,
 	}, nil
 }
@@ -117,9 +112,8 @@ func loadRequiredEnv() (map[string]string, error) {
 // optionalSettings 是選用環境變數解析後的結果。
 type optionalSettings struct {
 	dailyCallLimit      int
-	bufferSize          int
-	bufferDelayMs       int
-	singleBufferDelayMs int
+	syncJobBatchSize    int
+	syncJobPollIntervalMs int
 	logLevel            slog.Level
 }
 
@@ -130,13 +124,10 @@ func parseOptionalSettings() (optionalSettings, error) {
 	if s.dailyCallLimit, err = parseDailyCallLimit(os.Getenv("XERO_DAILY_CALL_LIMIT")); err != nil {
 		return s, err
 	}
-	if s.bufferSize, err = parseWebhookBufferSize(os.Getenv("WEBHOOK_BUFFER_SIZE")); err != nil {
+	if s.syncJobBatchSize, err = parseSyncJobBatchSize(os.Getenv("SYNC_JOB_BATCH_SIZE")); err != nil {
 		return s, err
 	}
-	if s.bufferDelayMs, err = parseWebhookBufferDelay(os.Getenv("WEBHOOK_BUFFER_DELAY")); err != nil {
-		return s, err
-	}
-	if s.singleBufferDelayMs, err = parseSingleBufferDelay(os.Getenv("SINGLE_BUFFER_DELAY")); err != nil {
+	if s.syncJobPollIntervalMs, err = parseSyncJobPollInterval(os.Getenv("SYNC_JOB_POLL_INTERVAL")); err != nil {
 		return s, err
 	}
 	if s.logLevel, err = parseLogLevel(os.Getenv("LOG_LEVEL")); err != nil {
@@ -213,38 +204,26 @@ func parseDailyCallLimit(raw string) (int, error) {
 	return n, nil
 }
 
-// parseWebhookBufferSize 未設定時回預設值；有值則必須是正整數。
-func parseWebhookBufferSize(raw string) (int, error) {
+// parseSyncJobBatchSize 未設定時回預設值；有值則必須是正整數。
+func parseSyncJobBatchSize(raw string) (int, error) {
 	if raw == "" {
-		return DefaultWebhookBufferSize, nil
+		return DefaultSyncJobBatchSize, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("WEBHOOK_BUFFER_SIZE 必須是正整數（目前 %q）", raw)
+		return 0, fmt.Errorf("SYNC_JOB_BATCH_SIZE 必須是正整數（目前 %q）", raw)
 	}
 	return n, nil
 }
 
-// parseWebhookBufferDelay 未設定時回預設毫秒數；有值則必須是正整數毫秒。
-func parseWebhookBufferDelay(raw string) (int, error) {
+// parseSyncJobPollInterval 未設定時回預設毫秒數；有值則必須是正整數毫秒。
+func parseSyncJobPollInterval(raw string) (int, error) {
 	if raw == "" {
-		return DefaultWebhookBufferDelayMs, nil
+		return DefaultSyncJobPollIntervalMs, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("WEBHOOK_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
-	}
-	return n, nil
-}
-
-// parseSingleBufferDelay 未設定時回預設毫秒數；有值則必須是正整數毫秒。
-func parseSingleBufferDelay(raw string) (int, error) {
-	if raw == "" {
-		return DefaultSingleBufferDelayMs, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("SINGLE_BUFFER_DELAY 必須是正整數毫秒（目前 %q）", raw)
+		return 0, fmt.Errorf("SYNC_JOB_POLL_INTERVAL 必須是正整數毫秒（目前 %q）", raw)
 	}
 	return n, nil
 }

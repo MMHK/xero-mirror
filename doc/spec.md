@@ -44,7 +44,7 @@
 ├── doc/
 │   ├── spec.md           # 架構與規格（必讀）
 │   ├── dev-setup.md      # 本機開發環境（dev／測試 MySQL、live 測試）
-│   ├── modules/          # 各模組設計（webhook-buffer.md、sync.md）
+│   ├── modules/          # 各模組設計（sync-queue.md、sync.md）
 │   └── plans/            # 實作計畫
 ├── docker-compose.yml        # 本機 dev MySQL 8.4（host port 3307）
 ├── docker-compose.test.yml   # 測試 MySQL（host port 13315，拋棄式、無 volume）
@@ -70,8 +70,10 @@ Xero webhook ─► POST /webhook ─驗簽─┬ 簽章錯 → 401
                                     └ 正確 → 立即回 200（先回應、後處理）
                                           ▼
                      webhook_events（resourceId+eventDate 去重）＋ sync_jobs（待辦入列）
-                                          ├─► WebhookBuffer ─► RunBatch（僅 Invoices／Contacts；不推進 cursor）
-                                          └─► 其餘實體／失敗案例留 sync_jobs，交 cron 增量
+                                          ├─► SyncJobQueue（背景 poll sync_jobs）
+                                          │    ├─ 按 (tenant, entity) 分組
+                                          │    ├─ 支援 IDs → RunBatch（Invoices／Contacts）
+                                          │    └─ 不支援 IDs → RunSingle 逐筆（其餘實體）
 
 cron／sync 手動／--month ─► Runner.RunAllIncremental／RunAllMonth
                                           ▼
@@ -91,8 +93,8 @@ cron／sync 手動／--month ─► Runner.RunAllIncremental／RunAllMonth
 // 唯一 fetch → upsert 核心；Window 只決定時間範圍，流程完全相同。
 func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Window) error
 
-// 批量抓取多個 entry IDs（用於 webhook buffer flush）。
-// 只支援有 IDs 參數的端點（Invoices、Contacts）；不支援的端點回錯誤，由 webhook buffer 交 cron 增量處理。
+// 批量抓取多個 entry IDs（用於 SyncJobQueue 處理支援 batch IDs 的實體）。
+// 只支援有 IDs 參數的端點（Invoices、Contacts）；不支援的端點回錯誤。
 func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, ids []string) error
 
 // 全部 active tenant 的入口：sync（無 --month）與 cron 都走 RunAllIncremental，
@@ -105,7 +107,7 @@ func (r *Runner) RunAllMonth(ctx context.Context, start, end time.Time) error
 |---------------|------|--------------------|
 | Cursor | `Cursor *time.Time`（讀自 `sync_state.cursor_time`；`nil` 代表首跑全量） | 端點支援時用 `If-Modified-Since`（`http.TimeFormat`，GMT）；不支援則全量 |
 | Month | `MonthStart` / `MonthEnd *time.Time`（該月 00:00 起、下月 00:00 止，UTC，半開區間；必須成對，且與 `Cursor` 互斥） | 端點支援日期篩選時以區間回補（`/Invoices` 用 `where=Date>=DateTime(y,m,d)&&Date<DateTime(...)`），配合冪等 upsert |
-| Batch IDs | `ids []string`（由 webhook buffer 收集的去重 entry IDs） | `?IDs=uuid1,uuid2,...`（URL 長度限制約 40 個，超過需分批） |
+| Batch IDs | `ids []string`（由 SyncJobQueue 從 sync_jobs 拉取並按 entity 分組的去重 entry IDs） | `?IDs=uuid1,uuid2,...`（URL 長度限制約 40 個，超過需分批） |
 
 **Window 退化規則**：月度視窗不是通用規則。`/Accounts`、`/Contacts` **不支援**日期區間過濾，對這兩者 Month 視窗退化為**全量 fetch + 冪等 upsert**，語意等同一次全量重跑（結果必須與全量 sync 相同）；日期欄位要用 `Date` 還是 `UpdatedDateUTC`，一律依端點能力決定，不得假設兩者皆可用。
 
@@ -188,7 +190,7 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 
 **月度回補**：所有五個實體都支援月度過濾。`/Invoices`、`/CreditNotes`、`/Payments` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`；`/Contacts`、`/Accounts` 使用 `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）。
 
-**批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，可用於 webhook buffer 聚合後一次抓取多個 entry。`/CreditNotes` 與 `/Payments` 不支援批量 IDs，webhook 觸發時不逐個抓取，只記 log 並交 cron cursor 增量（事件已持久化於 `sync_jobs`，不會遺失）。URL 長度限制約 40 個 IDs，超過需分批。**本服務策略**：矩陣中「只能逐個或全量」「`where` 可用 OR」屬 Xero API 能力描述；webhook 路徑一律不採用逐個／OR 抓取。
+**批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，SyncJobQueue 按 `(tenant, entity)` 分組後一次抓取多個 entry。`/CreditNotes`、`/Payments` 與 `/Accounts` 不支援批量 IDs，SyncJobQueue 以 `RunSingle` 逐筆抓取。URL 長度限制約 40 個 IDs，超過需分批。
 
 本服務自己的端點只允許 `GET`／`POST`，其他方法回 `405`；此限制不適用於呼叫 Xero API（詳見 §7.1）。
 
@@ -229,78 +231,72 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 6. 任一 `eventDateUtc` 解析失敗 → **整批**回 `400`，不部分入列。
 7. 入列失敗（`webhook_events`／`sync_jobs` 寫入錯誤）→ 回 `500`，刻意讓 Xero 重送以避免遺失；此為第 4 點「先回 200」的明文例外。
 
-### 7.0 Webhook Buffer 與 Batch Get（節省 API 配額）
+### 7.0 Sync Job Queue（取代 Webhook Buffer）
 
 **問題**：同一個 entry（如 Invoice A）短時間內可能觸發多個 webhook event（建立、更新、付款）。如果每個 event 都立即呼叫 API，會浪費配額。
 
-**解法**：收集多個 entry IDs，去重後批量抓取。
+**解法**：webhook handler 只做入列（`sync_jobs`），由背景 `SyncJobQueue` 定期 pull 並批量處理。
 
 ```
 收到 event (inv-A) ─┐
 收到 event (inv-B) ─┤
-收到 event (inv-A) ─┼─► Buffer 收集 {inv-A, inv-B}（去重）
+收到 event (inv-A) ─┼─► sync_jobs 去重入列（UNIQUE KEY: tenant_id, entity, xero_id）
 收到 event (inv-C) ─┘    │
-                         ▼
-                  達到 batch size 或 timer 到期
-                         │
-                         ▼
-                  GET /Invoices?IDs=inv-A,inv-B（1 次 API）
-                         │
-                         ▼
-                  upsert 全部資料
+                          ▼
+                   SyncJobQueue 背景 poll（忙輪詢 + 空閒等待）
+                          │
+                          ▼
+                   按 (tenant, entity) 分組
+                          │
+                          ▼
+                   支援 IDs: GET /Invoices?IDs=inv-A,inv-B（1 次 API）
+                   不支援 IDs: GET /CreditNotes/{id}（逐筆）
+                          │
+                          ▼
+                   upsert 全部資料 → 刪除 sync_jobs（成功）或移至 failed_sync_jobs（失敗）
 ```
 
-**Buffer 設計**
+**SyncJobQueue 設計**
 
-單一背景 goroutine（event loop）串行處理，所有 `pending` 狀態只在該 goroutine 記憶體取，不需額外 mutex 保護；HTTP handler 端只透過帶緩衝的 `events` channel 非阻塞派送。
+單一背景 goroutine 持續 poll `sync_jobs`，有數據時處理完立即 pull 下一批（不等待），無數據時等待 `SYNC_JOB_POLL_INTERVAL` 後再試。
 
 ```go
-// pkg/handler/buffer.go
-type WebhookBuffer struct {
-    runner     *pkgsync.Runner
-    batchSize  int
-    flushDelay time.Duration
-
-    baseCtx context.Context // 建構期設定後唯讀，loop 所有 flush 皆用它
-
-    events    chan bufferItem // 容量 1024，滿了記警告後丟棄，不阻塞 HTTP handler
-    done      chan struct{}
-    closeOnce sync.Once
-    mu        sync.Mutex
-    closed    bool
-
-    // (tenant, entity) → xero_id 集合（自動去重），僅 event loop 存取
-    pending map[string]map[pkgsync.Entity]map[string]struct{}
-    timer   *time.Timer
+// pkg/handler/sync_queue.go
+type SyncJobQueue struct {
+    runner       *pkgsync.Runner
+    store        *store.Store
+    batchSize    int           // 每次 poll 上限（預設 100）
+    pollInterval time.Duration // 佇列為空時的等待間隔（預設 5000ms）
+    baseCtx      context.Context
+    // ...
 }
 ```
-
-**觸發 flush 條件**（任一滿足即 flush，flush 一律用唯讀的 `baseCtx`）
-
-1. **Timer 到期**：收到第一個 event 後啟動 timer（預設 3 秒），到期 flush
-2. **Batch size**：單一 `(tenant, entity)` 群組累積達到 `batchSize`（預設 30），立即 flush 全部 pending
-3. **Shutdown**：關閉 `events` channel，event loop 把剩餘 pending 做最後 flush 後結束；`Shutdown(ctx)` 的 ctx 只控制等待上限（逾時回 `ctx.Err()`）
 
 **各端點策略**
 
 | 端點 | 策略 | 說明 |
 |------|------|------|
-| `/Invoices` | ✅ Buffer + RunBatch | 支援 `IDs`，`GET /Invoices?IDs=uuid1,uuid2,...` |
-| `/Contacts` | ✅ Buffer + RunBatch | 支援 `IDs`，`GET /Contacts?IDs=uuid1,uuid2,...` |
-| `/CreditNotes` | ❌ 只記 log，交 cron 增量 | 不支援 `IDs`，buffer 不呼叫 API，事件已在 `sync_jobs` |
-| `/Payments` | ❌ 只記 log，交 cron 增量 | 同上，不做逐個抓取或 `where=...OR...` |
-| `/Accounts` | ❌ 全量 + 冪等 upsert | 不分頁、不支援 IDs，全量重跑由 cron 負責 |
+| `/Invoices` | ✅ RunBatch 批量 | 支援 `IDs`，`GET /Invoices?IDs=uuid1,uuid2,...` |
+| `/Contacts` | ✅ RunBatch 批量 | 支援 `IDs`，`GET /Contacts?IDs=uuid1,uuid2,...` |
+| `/CreditNotes` | ✅ RunSingle 逐筆 | 不支援 `IDs`，`GET /CreditNotes/{id}` |
+| `/Payments` | ✅ RunSingle 逐筆 | 不支援 `IDs`，`GET /Payments/{id}` |
+| `/Accounts` | ✅ RunSingle 逐筆 | 不支援 `IDs`，`GET /Accounts/{id}` |
 
-**不支援批量 IDs 的端點**
+**失敗處理**
 
-`/CreditNotes` 與 `/Payments` 不支援 `IDs` 參數，實作採**單一策略：只記 `slog.Info`、不發任何 Xero 請求，交 cron cursor 增量收斂**。webhook 事件在 handler 端已持久化到 `webhook_events` 與 `sync_jobs`，不會因 buffer 不處理而遺失；亦**不做**逐個 `GET /CreditNotes/{id}` 或 `where=...OR...` fallback，避免在 flush 路徑對高頻事件逐個打 API、耗費配額。
+失敗的 job 會從 `sync_jobs` 刪除，並插入獨立的 `failed_sync_jobs` 表：
+
+- `RunBatch` 失敗：整組 job 刪除，插入 `failed_sync_jobs`，記錄錯誤訊息
+- `RunSingle` 失敗：單筆 job 刪除，插入 `failed_sync_jobs`，記錄錯誤訊息
+- `sync_jobs` 永遠只包含 pending 的 job，新的 webhook 事件可以正常 INSERT
+- 失敗的 job 不自動重試，可由 cron 增量補抓或從 `failed_sync_jobs` 手動重試
 
 **配置參數**
 
 | 環境變數 | 說明 | 預設 |
 |---------|------|------|
-| `WEBHOOK_BUFFER_SIZE` | 單個 entity 的 batch size | 30 |
-| `WEBHOOK_BUFFER_DELAY` | flush delay（毫秒） | 3000 |
+| `SYNC_JOB_BATCH_SIZE` | 每次 poll 拉取的 sync_jobs 上限 | 100 |
+| `SYNC_JOB_POLL_INTERVAL` | 佇列為空時的等待間隔（毫秒） | 5000 |
 
 ### 7.1 HTTP 路由表面
 
@@ -344,8 +340,8 @@ type WebhookBuffer struct {
 | `SYNC_CRON` | cron 表示式，例：`0 */2 * * *` |
 | `HTTP_ADDR` | `serve` 監聽位址，例：`:8080` |
 | `XERO_DAILY_CALL_LIMIT` | 選用；每 tenant 每日呼叫上限，未設定時採 `pkg/config` 內建預設（**禁**硬編碼在限流器） |
-| `WEBHOOK_BUFFER_SIZE` | 選用；webhook buffer 的 batch size，未設定時預設 30 |
-| `WEBHOOK_BUFFER_DELAY` | 選用；webhook buffer flush delay（毫秒），未設定時預設 3000 |
+| `SYNC_JOB_BATCH_SIZE` | 選用；sync job queue 每次 poll 上限，未設定時預設 100 |
+| `SYNC_JOB_POLL_INTERVAL` | 選用；sync job queue 佇列為空時的等待間隔（毫秒），未設定時預設 5000 |
 | `LOG_LEVEL` | 選用；日誌等級 `debug`／`info`／`warn`／`error`（大小寫不敏感），未設定時預設 `info`；非法值啟動即報錯 |
 
 新增變數固定三步：`pkg/config` 讀取並驗證 → 補 `.env.example` → 更新本文件。
@@ -379,10 +375,10 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
 - 建置與單元測試可在 host 直接跑；需要 DB 的整合測試走 `docker compose -f docker-compose.test.yml up -d`（測試 MySQL 不保留資料），DSN 以 `TEST_MYSQL_DSN` 傳入。
 - migration 與 `pkg/store` 對應的 SQL 修改要同一 commit；commit 前看 `git status`，用 Conventional Commits。
 - **graceful shutdown（`serve`）**：收到 `SIGINT`／`SIGTERM`（`main.go` 以 `signal.NotifyContext` 取消 root ctx）後，`commands.go` 的 `serveDeps.shutdown` 依固定順序關閉，單步失敗只 `slog.Warn` 續行、不中斷後續步驟。關機流程自建 `context.WithTimeout(context.Background(), 30s)`（常數 `shutdownTimeout`，**總上限**、各步共用同一預算），不依賴已被信號取消的 root ctx，因此等待必定有上限：
-  1. **context 生命週期**：`runServe` 建立兩條獨立於 signal ctx、派生自 `context.Background()` 的 context —— `cronCtx`（cron 同步用）與 `bufCtx`（`WebhookBuffer` 的 `baseCtx`，flush 用）。signal ctx 取消只觸發關機流程，不會連帶讓在飛同步或最後 flush 立刻失效；兩者皆 `defer cancel` 防洩漏，並由 shutdown 路徑掌控實際取消時機。
+  1. **context 生命週期**：`runServe` 建立兩條獨立於 signal ctx、派生自 `context.Background()` 的 context —— `cronCtx`（cron 同步用）與 `queueCtx`（`SyncJobQueue` 的 `baseCtx`，poll 用）。signal ctx 取消只觸發關機流程，不會連帶讓在飛同步或最後 poll 立刻失效；兩者皆 `defer cancel` 防洩漏，並由 shutdown 路徑掌控實際取消時機。
   2. `cron.Stop()`：停止排新 job。robfig/cron v3 的 `Stop()` 回傳一個 `context.Context`，會在所有執行中 job 結束時 done；服務在 30 秒總預算內 `select` 等待，**逾時才呼叫 `cancelCron()`** 取消 cronCtx，讓仍在飛的 cron／HTTP／DB 呼叫收斂後繼續關機（job 及時結束則不取消）。
   3. `http.Server.Shutdown(shutdownCtx)`：停止接收新連線並讓進行中請求收尾，等待受 30 秒總預算約束。
-  4. `WebhookBuffer.Shutdown(shutdownCtx)`：event loop 把剩餘 pending 做最後 flush 後結束；**此時 `bufCtx` 尚未取消**，最後 flush 仍有效，此步不得被前一步的錯誤跳過。flush 完成（或等待逾時）後才呼叫 `cancelBuf()`。
+  4. `SyncJobQueue.Shutdown(shutdownCtx)`：等待當前處理中的 job 完成（或逾時）；**此時 `queueCtx` 尚未取消**，處理中的同步仍有效，此步不得被前一步的錯誤跳過。處理完成（或等待逾時）後才取消 `queueCtx`。
   5. `*sql.DB.Close()`：關閉連線池。
 - **cron 重疊防護（M1）**：cron 以 `cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))` 建立；上一輪 `runCronSync` 還在執行時，到點的下一輪直接跳過（記 logger 訊息），避免長同步與下一輪重疊、互相踩到 `sync_state` 水位。
 - **cron 同步語意（`runCronSync`）**：cron 回呼只負責 `slog.Info("cron 同步開始")` 後呼叫 `sync.Runner.RunAllIncremental`，不再自行列 tenant 或另寫同步流程；失敗只 `slog.Warn("cron 同步未全部成功", "err", err)`，不讓排程中斷。`RunAllIncremental` 先用 `store.ListTenants` 取 `auth_status = 'active'` 的 tenant（`auth_required` 需重新授權才會再入列），再逐 tenant 呼叫 `sync.RunTenant`；`RunTenant` 依 `Entities()` 固定順序（Invoices、CreditNotes、Payments、Contacts、Accounts）對各實體跑 `RunIncremental`（讀 `sync_state.cursor_time`，無紀錄視為首跑全量）。單一實體失敗只 `slog.Warn` 並續跑，全部實體都失敗 `RunTenant` 才回錯；單一 tenant 失敗同樣 Warn 後續跑下一個 tenant。失敗計數一律以 tenant 為單位（`RunAllMonth` 任一實體失敗即記該 tenant 失敗，錯誤訊息為 `同步失敗 N 個 tenant`）。

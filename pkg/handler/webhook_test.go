@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/mmhk/xero-mirror/pkg/store"
-	pkgsync "github.com/mmhk/xero-mirror/pkg/sync"
 	"github.com/mmhk/xero-mirror/tests"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +77,7 @@ func openHandlerStore(t *testing.T) *store.Store {
 }
 
 func TestHandleRejectsBadSignature(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil)
+	h := NewWebhookHandler(nil, []byte(testWebhookKey))
 	body := webhookBody(1, "t1")
 
 	rec := sendWebhook(h, body, "not-a-valid-signature")
@@ -87,7 +86,7 @@ func TestHandleRejectsBadSignature(t *testing.T) {
 }
 
 func TestHandleRejectsNonPost(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil)
+	h := NewWebhookHandler(nil, []byte(testWebhookKey))
 	req := httptest.NewRequest(http.MethodGet, "/webhook", nil)
 	rec := httptest.NewRecorder()
 	h.Handle(rec, req)
@@ -95,7 +94,7 @@ func TestHandleRejectsNonPost(t *testing.T) {
 }
 
 func TestHandleRejectsInvalidJSON(t *testing.T) {
-	h := NewWebhookHandler(nil, []byte(testWebhookKey), nil, nil)
+	h := NewWebhookHandler(nil, []byte(testWebhookKey))
 	body := []byte("this is not json")
 
 	rec := sendWebhook(h, body, sign(body, testWebhookKey))
@@ -105,7 +104,7 @@ func TestHandleRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleEnqueuesOncePerEvent(t *testing.T) {
 	s := openHandlerStore(t)
-	h := NewWebhookHandler(s, []byte(testWebhookKey), nil, nil)
+	h := NewWebhookHandler(s, []byte(testWebhookKey))
 	ctx := context.Background()
 
 	t.Run("重送同一 payload 只入列一次", func(t *testing.T) {
@@ -141,18 +140,4 @@ func TestHandleEnqueuesOncePerEvent(t *testing.T) {
 	})
 }
 
-// TestDispatchToBufferRoutesByEntityCapability 驗證 dispatchToBuffer 依實體能力分流：
-// - Contacts/Invoices（支援 batch IDs）走 batch buffer
-// - CreditNotes/Payments（支援 single get）走 single buffer
-func TestDispatchToBufferRoutesByEntityCapability(t *testing.T) {
-	// 驗證分流邏輯的正確性：支援度矩陣
-	require.True(t, pkgsync.SupportsBatchIDs(pkgsync.EntityInvoices))
-	require.True(t, pkgsync.SupportsBatchIDs(pkgsync.EntityContacts))
-	require.False(t, pkgsync.SupportsBatchIDs(pkgsync.EntityCreditNotes))
-	require.False(t, pkgsync.SupportsBatchIDs(pkgsync.EntityPayments))
 
-	require.True(t, pkgsync.SupportsSingleGet(pkgsync.EntityCreditNotes))
-	require.True(t, pkgsync.SupportsSingleGet(pkgsync.EntityPayments))
-	require.False(t, pkgsync.SupportsSingleGet(pkgsync.EntityInvoices))
-	require.False(t, pkgsync.SupportsSingleGet(pkgsync.EntityContacts))
-}

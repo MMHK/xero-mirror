@@ -44,8 +44,20 @@ type SyncJob struct {
 	XeroID     string
 	Reason     string
 	Status     string
+	LastError  *string
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+}
+
+// DB row: failed_sync_jobs；儲存失敗的同步任務，供除錯與重試。
+type FailedSyncJob struct {
+	ID        int64
+	TenantID  string
+	Entity    string
+	XeroID    string
+	Reason    string
+	LastError *string
+	FailedAt  time.Time
 }
 
 // DB row: xero_contacts。

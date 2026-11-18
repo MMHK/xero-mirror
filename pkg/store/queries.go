@@ -95,12 +95,12 @@ ON DUPLICATE KEY UPDATE
 	finished_at = NULL`
 
 const selectPendingSyncJobsSQL = `
-SELECT id, tenant_id, entity, xero_id, reason, status, created_at, finished_at
+SELECT id, tenant_id, entity, xero_id, reason, status, last_error, created_at, finished_at
 FROM sync_jobs WHERE status = 'pending'
 ORDER BY created_at, id LIMIT ?`
 
 const selectPendingSyncJobsByTenantSQL = `
-SELECT id, tenant_id, entity, xero_id, reason, status, created_at, finished_at
+SELECT id, tenant_id, entity, xero_id, reason, status, last_error, created_at, finished_at
 FROM sync_jobs WHERE status = 'pending' AND tenant_id = ?
 ORDER BY created_at, id LIMIT ?`
 
@@ -110,8 +110,15 @@ SELECT COUNT(*) FROM webhook_events WHERE tenant_id = ?`
 const countInvoicesByTenantSQL = `
 SELECT COUNT(*) FROM xero_invoices WHERE tenant_id = ?`
 
-const markSyncJobDoneSQL = `
-UPDATE sync_jobs SET status = 'done', finished_at = ? WHERE id = ?`
+const deleteSyncJobSQL = `DELETE FROM sync_jobs WHERE id = ?`
+
+const markSyncJobFailedSQL = `
+DELETE FROM sync_jobs WHERE id = ?`
+
+const insertFailedSyncJobSQL = `
+INSERT INTO failed_sync_jobs (
+    tenant_id, entity, xero_id, reason, last_error, failed_at
+) VALUES (?, ?, ?, ?, ?, ?)`
 
 const upsertContactSQL = `
 INSERT INTO xero_contacts (
@@ -420,7 +427,7 @@ func (s *Store) GetPendingSyncJobs(ctx context.Context, limit int) ([]SyncJob, e
 	for rows.Next() {
 		var j SyncJob
 		if err := rows.Scan(&j.ID, &j.TenantID, &j.Entity, &j.XeroID,
-			&j.Reason, &j.Status, &j.CreatedAt, &j.FinishedAt); err != nil {
+			&j.Reason, &j.Status, &j.LastError, &j.CreatedAt, &j.FinishedAt); err != nil {
 			return nil, fmt.Errorf("讀取 sync_job: %w", err)
 		}
 		jobs = append(jobs, j)
@@ -447,7 +454,7 @@ func (s *Store) GetPendingSyncJobsByTenant(ctx context.Context, tenantID string,
 	for rows.Next() {
 		var j SyncJob
 		if err := rows.Scan(&j.ID, &j.TenantID, &j.Entity, &j.XeroID,
-			&j.Reason, &j.Status, &j.CreatedAt, &j.FinishedAt); err != nil {
+			&j.Reason, &j.Status, &j.LastError, &j.CreatedAt, &j.FinishedAt); err != nil {
 			return nil, fmt.Errorf("讀取 sync_job: %w", err)
 		}
 		jobs = append(jobs, j)
@@ -476,10 +483,20 @@ func (s *Store) CountInvoicesByTenant(ctx context.Context, tenantID string) (int
 	return n, nil
 }
 
-// MarkSyncJobDone 把 job 標為 done 並記錄完成時間。
-func (s *Store) MarkSyncJobDone(ctx context.Context, tx *sql.Tx, id int64) error {
-	if _, err := tx.ExecContext(ctx, markSyncJobDoneSQL, time.Now().UTC(), id); err != nil {
-		return fmt.Errorf("標記 sync_job %d 完成: %w", id, err)
+// DeleteSyncJob 刪除指定 job；成功處理後呼叫，避免 UNIQUE KEY 擋住新的 INSERT。
+func (s *Store) DeleteSyncJob(ctx context.Context, tx *sql.Tx, id int64) error {
+	if _, err := tx.ExecContext(ctx, deleteSyncJobSQL, id); err != nil {
+		return fmt.Errorf("刪除 sync_job %d: %w", id, err)
+	}
+	return nil
+}
+
+// InsertFailedSyncJob 插入失敗的 job 到 failed_sync_jobs 表，供除錯與重試。
+func (s *Store) InsertFailedSyncJob(ctx context.Context, tx *sql.Tx, j FailedSyncJob) error {
+	_, err := tx.ExecContext(ctx, insertFailedSyncJobSQL,
+		j.TenantID, j.Entity, j.XeroID, j.Reason, j.LastError, j.FailedAt)
+	if err != nil {
+		return fmt.Errorf("插入 failed_sync_job: %w", err)
 	}
 	return nil
 }

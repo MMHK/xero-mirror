@@ -50,13 +50,13 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-func TestLoadWebhookBuffer(t *testing.T) {
+func TestLoadSyncJobQueue(t *testing.T) {
 	t.Run("未設定採預設值", func(t *testing.T) {
 		setValidEnv(t)
 		cfg, err := Load()
 		require.NoError(t, err)
-		require.Equal(t, DefaultWebhookBufferSize, cfg.WebhookBufferSize)
-		require.Equal(t, DefaultWebhookBufferDelayMs*time.Millisecond, cfg.WebhookBufferDelay)
+		require.Equal(t, DefaultSyncJobBatchSize, cfg.SyncJobBatchSize)
+		require.Equal(t, DefaultSyncJobPollIntervalMs*time.Millisecond, cfg.SyncJobPollInterval)
 	})
 
 	cases := []struct {
@@ -64,8 +64,8 @@ func TestLoadWebhookBuffer(t *testing.T) {
 		apply   func(t *testing.T)
 		wantErr string
 	}{
-		{"size 非法", func(t *testing.T) { t.Setenv("WEBHOOK_BUFFER_SIZE", "0") }, "WEBHOOK_BUFFER_SIZE 必須是正整數"},
-		{"delay 非法", func(t *testing.T) { t.Setenv("WEBHOOK_BUFFER_DELAY", "x") }, "WEBHOOK_BUFFER_DELAY 必須是正整數毫秒"},
+		{"batch size 非法", func(t *testing.T) { t.Setenv("SYNC_JOB_BATCH_SIZE", "0") }, "SYNC_JOB_BATCH_SIZE 必須是正整數"},
+		{"poll interval 非法", func(t *testing.T) { t.Setenv("SYNC_JOB_POLL_INTERVAL", "x") }, "SYNC_JOB_POLL_INTERVAL 必須是正整數毫秒"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
