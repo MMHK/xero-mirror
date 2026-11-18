@@ -58,7 +58,9 @@ func TestRunMonthWindowFallback(t *testing.T) {
 	})
 	require.NoError(t, r.Run(context.Background(), "t1", EntityContacts, monthWindow()))
 	q := <-got
-	require.Empty(t, q.Get("where"))
+	// Contacts 現在使用 UpdatedDateUTC 進行月度過濾
+	require.Contains(t, q.Get("where"), "UpdatedDateUTC>=DateTime(2026,5,1)")
+	require.Contains(t, q.Get("where"), "UpdatedDateUTC<DateTime(2026,6,1)")
 	require.Empty(t, q.Get("from"))
 	require.Empty(t, q.Get("to"))
 	require.Equal(t, "1", q.Get("page"))
@@ -89,6 +91,33 @@ func TestRunMonthUsesWhereClause(t *testing.T) {
 	require.Contains(t, q.Get("where"), "DateTime(2026,6,1)")
 	require.Empty(t, q.Get("from"))
 	require.Empty(t, q.Get("to"))
+}
+
+// TestRunMonthUsesCorrectDateField 驗證各實體使用正確的日期欄位進行月度過濾（表驅動）。
+func TestRunMonthUsesCorrectDateField(t *testing.T) {
+	cases := []struct {
+		entity Entity
+		field  string
+		json   string
+	}{
+		{EntityInvoices, "Date", `{"Invoices":[]}`},
+		{EntityCreditNotes, "Date", `{"CreditNotes":[]}`},
+		{EntityPayments, "Date", `{"Payments":[]}`},
+		{EntityContacts, "UpdatedDateUTC", `{"Contacts":[]}`},
+		{EntityAccounts, "UpdatedDateUTC", `{"Accounts":[]}`},
+	}
+	for _, c := range cases {
+		got := make(chan url.Values, 1)
+		r := newRunner(t, func(w http.ResponseWriter, req *http.Request) {
+			got <- req.URL.Query()
+			fmt.Fprint(w, c.json)
+		})
+		require.NoError(t, r.Run(context.Background(), "t1", c.entity, monthWindow()), string(c.entity))
+		q := <-got
+		where := q.Get("where")
+		require.Contains(t, where, c.field+">=DateTime(2026,5,1)", string(c.entity))
+		require.Contains(t, where, c.field+"<DateTime(2026,6,1)", string(c.entity))
+	}
 }
 
 func TestRunCursorMonthMutuallyExclusive(t *testing.T) {

@@ -179,14 +179,14 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 | 端點 | 分頁 | 增量／篩選方式 | 批量 IDs | 備註 |
 |------|------|----------------|----------|------|
 | `GET /Invoices` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 主力實體 |
-| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`／`where`（`Date>` 支援，`>=` 不支援） | ❌ 不支援 | 無批量參數，只能逐個或全量；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
-| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`；`where` 可用 OR 條件 | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since`；月度視窗 `monthFilter=false`，仍走全量 |
-| `GET /Contacts` | `page=1..N`，每頁 100 | **不支援**日期區間；`If-Modified-Since` 官方文件列支援（2026-11-17），程式已啟用 `If-Modified-Since` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | Month 視窗 → 全量 |
-| `GET /Accounts` | 不分頁（單次回傳全部） | 全量 | ❌ 不支援 | Month 視窗 → 全量 |
+| `GET /CreditNotes` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ❌ 不支援 | 無批量參數，只能逐個或全量；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since` 與月度 `Date` 過濾 |
+| `GET /Payments` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)` | ❌ 不支援 `IDs`，可用 `where=PaymentID=guid("...") OR ...` | OR 條件有長度限制；2026-11-17 官方文件核對，程式已啟用 `If-Modified-Since` 與月度 `Date` 過濾 |
+| `GET /Contacts` | `page=1..N`，每頁 100 | `If-Modified-Since`（cursor）；Month 用 `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)` | ✅ `?IDs=uuid1,uuid2,...`（約 40 個/請求） | 無 `Date` 欄位，改用 `UpdatedDateUTC` 進行月度過濾 |
+| `GET /Accounts` | 不分頁（單次回傳全部） | `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)` | ❌ 不支援 | 無 `Date` 欄位，改用 `UpdatedDateUTC` 進行月度過濾；不分頁但可下 where 條件 |
 
 **預設規則**：矩陣中標「未啟用」或尚未核對的能力，一律走全量 fetch + 冪等 upsert，**不得假設** `If-Modified-Since` 可用；核對結果須回寫本矩陣。
 
-**月度回補**：`/Invoices` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）；`/Contacts`、`/Accounts` 等不支援日期篩選的端點退化為全量 fetch + 冪等 upsert。
+**月度回補**：所有五個實體都支援月度過濾。`/Invoices`、`/CreditNotes`、`/Payments` 使用 `where=Date>=DateTime(YYYY,MM,DD)&&Date<DateTime(YYYY,MM,DD)`；`/Contacts`、`/Accounts` 使用 `where=UpdatedDateUTC>=DateTime(YYYY,MM,DD)&&UpdatedDateUTC<DateTime(YYYY,MM,DD)`（UTC 年月日、半開區間，不送 `from`／`to`）。
 
 **批量查詢**：`/Invoices` 與 `/Contacts` 支援 `IDs` 參數，可用於 webhook buffer 聚合後一次抓取多個 entry。`/CreditNotes` 與 `/Payments` 不支援批量 IDs，webhook 觸發時不逐個抓取，只記 log 並交 cron cursor 增量（事件已持久化於 `sync_jobs`，不會遺失）。URL 長度限制約 40 個 IDs，超過需分批。**本服務策略**：矩陣中「只能逐個或全量」「`where` 可用 OR」屬 Xero API 能力描述；webhook 路徑一律不採用逐個／OR 抓取。
 

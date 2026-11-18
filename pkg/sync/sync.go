@@ -54,17 +54,18 @@ type entitySpec struct {
 	paginated        bool
 	supportsSince    bool
 	monthFilter      bool
+	monthFilterField string // 月度過濾使用的欄位名稱（"Date" 或 "UpdatedDateUTC"）
 	supportsBatchIDs bool   // 支援 ?IDs=uuid1,uuid2,... 批量查詢
 	singlePath       string // single get 端點路徑模板（含 %s 佔位符），空字串代表不支援
 }
 
 // entitySpecs 是五個實體的端點能力表（對照 doc/spec.md §5）。
 var entitySpecs = map[Entity]entitySpec{
-	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: true, singlePath: ""},
-	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: false, supportsBatchIDs: false, singlePath: "/Accounts/%s"},
-	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, supportsBatchIDs: true, singlePath: ""},
-	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false, singlePath: "/CreditNotes/%s"},
-	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: true, monthFilter: false, supportsBatchIDs: false, singlePath: "/Payments/%s"},
+	EntityContacts:    {path: "/Contacts", paginated: true, supportsSince: true, monthFilter: true, monthFilterField: "UpdatedDateUTC", supportsBatchIDs: true, singlePath: ""},
+	EntityAccounts:    {path: "/Accounts", paginated: false, supportsSince: false, monthFilter: true, monthFilterField: "UpdatedDateUTC", supportsBatchIDs: false, singlePath: "/Accounts/%s"},
+	EntityInvoices:    {path: "/Invoices", paginated: true, supportsSince: true, monthFilter: true, monthFilterField: "Date", supportsBatchIDs: true, singlePath: ""},
+	EntityCreditNotes: {path: "/CreditNotes", paginated: true, supportsSince: true, monthFilter: true, monthFilterField: "Date", supportsBatchIDs: false, singlePath: "/CreditNotes/%s"},
+	EntityPayments:    {path: "/Payments", paginated: true, supportsSince: true, monthFilter: true, monthFilterField: "Date", supportsBatchIDs: false, singlePath: "/Payments/%s"},
 }
 
 // Entities 回傳固定順序的五個同步實體；cron 與整 tenant 編排都照此順序執行。
@@ -544,17 +545,18 @@ func buildRequest(spec entitySpec, w Window) (url.Values, map[string]string) {
 	if w.MonthStart == nil || w.MonthEnd == nil {
 		return query, headers
 	}
-	if spec.monthFilter {
-		query.Set("where", monthWhere(*w.MonthStart, *w.MonthEnd))
+	if spec.monthFilter && spec.monthFilterField != "" {
+		query.Set("where", monthWhere(spec.monthFilterField, *w.MonthStart, *w.MonthEnd))
 	}
 	return query, headers
 }
 
-// monthWhere 組出 Xero where 條件（UTC 年月日、半開區間）：Date>=DateTime(...)&&Date<DateTime(...)。
-func monthWhere(start, end time.Time) string {
+// monthWhere 組出 Xero where 條件（UTC 年月日、半開區間）：{field}>=DateTime(...)&&{field}<DateTime(...)。
+func monthWhere(field string, start, end time.Time) string {
 	s, e := start.UTC(), end.UTC()
-	return fmt.Sprintf("Date>=DateTime(%d,%d,%d)&&Date<DateTime(%d,%d,%d)",
-		s.Year(), int(s.Month()), s.Day(), e.Year(), int(e.Month()), e.Day())
+	return fmt.Sprintf("%s>=DateTime(%d,%d,%d)&&%s<DateTime(%d,%d,%d)",
+		field, s.Year(), int(s.Month()), s.Day(),
+		field, e.Year(), int(e.Month()), e.Day())
 }
 
 // latest 回傳 cur 與 batch 中較晚者；batch 為 nil 時沿用 cur，不清空水位。
