@@ -160,6 +160,20 @@ Schema 唯一來源是 `pkg/store/migrations/` 的編號 DDL（`NNN_name.up.sql`
 - **檔案配對**：每個 `.up.sql` 必須有對應 `.down.sql`，缺檔視為設定錯誤（啟動即報錯）；DB 已記錄但檔案已移除的版本只 `slog.Warn`，不阻擋啟動。
 - **`.down.sql`** 只供人工回滾（執行後刪掉 `schema_migrations` 對應列），程式**不自動**執行 down。
 
+### 4.2 DB 連線池設定
+
+`store.OpenMigrated` 在 `sql.Open` 後、`PingContext` 前設定連線池參數，確保連線穩定：
+
+| 參數 | 值 | 理由 |
+|------|-----|------|
+| `MaxOpenConns` | 25 | 避免超過 MySQL `max_connections` |
+| `MaxIdleConns` | 10 | 保留空閒連線，減少重建開銷 |
+| `ConnMaxLifetime` | 5 min | 遠小於 MySQL `wait_timeout`（預設 8h），避免被無聲斷開 |
+
+- **連線時機**：Eager connect。`sql.Open` 本身是 lazy，但緊接的 `PingContext` 強制立即連線；MySQL 掛掉時啟動即失敗。
+- **Auto reconnect**：Go `database/sql` 內建連線池管理，連線斷線時自動重連、自動剔除壞連線。
+- **硬編碼**：連線池參數是底層基礎設施，不引入 env 變數；需調整時改 `pkg/store/migrate.go` 常數即可。
+
 ## 5. Xero API 約定（強制）
 
 | 項目 | 約定 |

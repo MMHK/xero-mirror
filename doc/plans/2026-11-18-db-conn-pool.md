@@ -3,7 +3,7 @@
 > **⚠️ AI 生成聲明**：本文件由 AI 輔助生成，僅供參考。所有內容必須經過**人類 Review + 確認**後才能進入實施階段。未經確認前，不得開始任何開發工作。
 
 **建立日期**: 2026-11-18
-**狀態**: 🟡 等待 Review
+**狀態**: 🟢 完成
 **優先級**: Medium
 
 ## 背景與目標
@@ -55,15 +55,16 @@ db.SetConnMaxLifetime(dbConnMaxLifetime)
 
 | # | 任務 | 狀態 | Sub Agent | 備註 |
 |---|------|------|-----------|------|
-| 1 | 在 `OpenMigrated` 加入連線池設定（3 個常數 + 3 行 setter） | ⬜ 待處理 | — | 改 `pkg/store/migrate.go` |
-| 2 | 確認 `go build` 通過、`go test ./...` 通過 | ⬜ 待處理 | — | |
-| 3 | Code review | ⬜ 待處理 | — | |
+| 1 | 在 `OpenMigrated` 加入連線池設定（3 個常數 + 3 行 setter） | ✅ 完成 | general | 改 `pkg/store/migrate.go` |
+| 2 | 確認 `go build` 通過、`go test ./...` 通過 | ✅ 完成 | general | |
+| 3 | Code review | ✅ 完成 | main agent | 變更正確，符合計畫 |
 
 ## 人類 Review 記錄
 
 | 日期 | 動作 | 備註 |
 |------|------|------|
 | 2026-11-18 | ⏳ 等待 Review | |
+| 2026-11-18 | ✅ 已批准 | 硬編碼方案，不加 env 變數 |
 
 ## Review 日誌
 

@@ -22,6 +22,13 @@ const (
 	migrateLockTimeout = 30
 	// pingTimeout 是建立 MySQL 連線後的驗證逾時。
 	pingTimeout = 10 * time.Second
+
+	// dbMaxOpenConns 是 MySQL 連線池最大開啟連線數。
+	dbMaxOpenConns = 25
+	// dbMaxIdleConns 是 MySQL 連線池最大空閒連線數。
+	dbMaxIdleConns = 10
+	// dbConnMaxLifetime 是連線最大存活時間，須遠小於 MySQL wait_timeout（預設 8h）。
+	dbConnMaxLifetime = 5 * time.Minute
 )
 
 // OpenMigrated 開啟 MySQL、驗證可連線並套用 migration；任何失敗都會關閉連線。
@@ -30,6 +37,9 @@ func OpenMigrated(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("開啟 MySQL 連線: %w", err)
 	}
+	db.SetMaxOpenConns(dbMaxOpenConns)
+	db.SetMaxIdleConns(dbMaxIdleConns)
+	db.SetConnMaxLifetime(dbConnMaxLifetime)
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
