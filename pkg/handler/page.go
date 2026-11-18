@@ -39,7 +39,7 @@ func (h *PageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := pageAssets.ReadFile(name)
 	if err != nil {
-		slog.Error("讀取頁面資產失敗", "asset", name, "err", err)
+		slog.Error("read page asset failed", "asset", name, "err", err)
 		http.Error(w, "讀取頁面失敗", http.StatusInternalServerError)
 		return
 	}

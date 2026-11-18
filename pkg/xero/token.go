@@ -89,7 +89,7 @@ func (m *TokenManager) refresh(ctx context.Context, tenantID, refreshToken strin
 	tok, err := m.oauth.Refresh(ctx, refreshToken)
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid_grant") {
-			slog.Error("tenant 授權已失效，需重新授權", "tenant", tenantID)
+			slog.Error("tenant authorization expired, re-authorization required", "tenant", tenantID)
 			m.markAuthRequired(ctx, tenantID)
 			return "", fmt.Errorf("tenant %s 授權已失效，請重新執行 xero-mirror auth", tenantID)
 		}
@@ -111,7 +111,7 @@ func (m *TokenManager) refresh(ctx context.Context, tenantID, refreshToken strin
 	expiry := tok.Expiry
 	if expiry.IsZero() {
 		expiry = now.Add(defaultTokenTTL)
-		slog.Warn("token 未帶到期時間，採預設 25 分鐘", "tenant", tenantID)
+		slog.Warn("token missing expiry time, using default 25 minutes", "tenant", tenantID)
 	}
 	err = m.store.WithTx(ctx, func(tx *sql.Tx) error {
 		return m.store.UpdateTenantTokens(ctx, tx, tenantID, &accessEnc, &refreshEnc, expiry, now)
@@ -128,7 +128,7 @@ func (m *TokenManager) markAuthRequired(ctx context.Context, tenantID string) {
 		return m.store.UpdateTenantAuthStatus(ctx, tx, tenantID, authStatusRequired)
 	})
 	if err != nil {
-		slog.Warn("標記 tenant 授權狀態失敗", "tenant", tenantID, "err", err)
+		slog.Warn("mark tenant authorization status failed", "tenant", tenantID, "err", err)
 	}
 }
 

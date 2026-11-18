@@ -25,7 +25,7 @@ func main() {
 		return
 	}
 	if err != nil {
-		slog.Error("執行失敗", "err", err)
+		slog.Error("execution failed", "err", err)
 		os.Exit(1)
 	}
 }

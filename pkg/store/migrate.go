@@ -77,10 +77,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if err := applyFile(ctx, conn, version); err != nil {
 			return err
 		}
-		slog.Info("migration 完成", "version", version)
+		slog.Info("migration completed", "version", version)
 		n++
 	}
-	slog.Info("migration 全部完成", "applied", n)
+	slog.Info("all migrations completed", "applied", n)
 	return nil
 }
 
@@ -113,11 +113,11 @@ func acquireLock(ctx context.Context, conn *sql.Conn) error {
 func releaseLock(ctx context.Context, conn *sql.Conn) {
 	var released sql.NullInt64
 	if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", migrateLockName).Scan(&released); err != nil {
-		slog.Warn("釋放 migration 鎖失敗", "err", err)
+		slog.Warn("release migration lock failed", "err", err)
 		return
 	}
 	if !released.Valid || released.Int64 != 1 {
-		slog.Warn("釋放 migration 鎖失敗", "released", released)
+		slog.Warn("release migration lock failed", "released", released)
 	}
 }
 
@@ -184,7 +184,7 @@ func warnUnknownVersions(applied map[string]bool, versions []string) {
 	}
 	for version := range applied {
 		if !known[version] {
-			slog.Warn("DB 有 migration 版本但檔案不存在", "version", version)
+			slog.Warn("orphaned migration version in DB", "version", version)
 		}
 	}
 }

@@ -381,7 +381,7 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
   4. `SyncJobQueue.Shutdown(shutdownCtx)`：等待當前處理中的 job 完成（或逾時）；**此時 `queueCtx` 尚未取消**，處理中的同步仍有效，此步不得被前一步的錯誤跳過。處理完成（或等待逾時）後才取消 `queueCtx`。
   5. `*sql.DB.Close()`：關閉連線池。
 - **cron 重疊防護（M1）**：cron 以 `cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))` 建立；上一輪 `runCronSync` 還在執行時，到點的下一輪直接跳過（記 logger 訊息），避免長同步與下一輪重疊、互相踩到 `sync_state` 水位。
-- **cron 同步語意（`runCronSync`）**：cron 回呼只負責 `slog.Info("cron 同步開始")` 後呼叫 `sync.Runner.RunAllIncremental`，不再自行列 tenant 或另寫同步流程；失敗只 `slog.Warn("cron 同步未全部成功", "err", err)`，不讓排程中斷。`RunAllIncremental` 先用 `store.ListTenants` 取 `auth_status = 'active'` 的 tenant（`auth_required` 需重新授權才會再入列），再逐 tenant 呼叫 `sync.RunTenant`；`RunTenant` 依 `Entities()` 固定順序（Invoices、CreditNotes、Payments、Contacts、Accounts）對各實體跑 `RunIncremental`（讀 `sync_state.cursor_time`，無紀錄視為首跑全量）。單一實體失敗只 `slog.Warn` 並續跑，全部實體都失敗 `RunTenant` 才回錯；單一 tenant 失敗同樣 Warn 後續跑下一個 tenant。失敗計數一律以 tenant 為單位（`RunAllMonth` 任一實體失敗即記該 tenant 失敗，錯誤訊息為 `同步失敗 N 個 tenant`）。
+- **cron 同步語意（`runCronSync`）**：cron 回呼只負責 `slog.Info("cron sync started")` 後呼叫 `sync.Runner.RunAllIncremental`，不再自行列 tenant 或另寫同步流程；失敗只 `slog.Warn("cron sync not all successful", "err", err)`，不讓排程中斷。`RunAllIncremental` 先用 `store.ListTenants` 取 `auth_status = 'active'` 的 tenant（`auth_required` 需重新授權才會再入列），再逐 tenant 呼叫 `sync.RunTenant`；`RunTenant` 依 `Entities()` 固定順序（Invoices、CreditNotes、Payments、Contacts、Accounts）對各實體跑 `RunIncremental`（讀 `sync_state.cursor_time`，無紀錄視為首跑全量）。單一實體失敗只 `slog.Warn` 並續跑，全部實體都失敗 `RunTenant` 才回錯；單一 tenant 失敗同樣 Warn 後續跑下一個 tenant。失敗計數一律以 tenant 為單位（`RunAllMonth` 任一實體失敗即記該 tenant 失敗，錯誤訊息為 `同步失敗 N 個 tenant`）。
 - `serve` 的 HTTP server 必須設 `ReadHeaderTimeout`（常數 `readHeaderTimeout`，10 秒），避免無 timeout 的常駐 server；`AddFunc` 回傳 error 視為啟動失敗，不得靜默略過。
 
 ## 10. 錯誤處理、日誌與測試
@@ -392,7 +392,7 @@ Migration 已 `//go:embed` 進 binary（stdlib，無額外依賴）：`sync`／`
 | 非致命錯誤 | `slog.Warn` + 降級續跑；單一 entity 失敗不得讓整輪崩潰；429 以 `slog.Debug`／`Warn` 記錄退避 |
 | 致命錯誤 | 缺設定、DB 連不上 → `slog.Error` 後 exit |
 | 日誌庫 | 只用 stdlib `log/slog`，**禁** logrus／zap／`log.Printf` |
-| 訊息格式 | 繁體中文 + 結構化欄位：`slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", n)` |
+| 訊息格式 | 英文 + 結構化欄位：`slog.Info("sync completed", "tenant", tenantID, "entity", entity, "count", n)` |
 | 敏感資料 | **禁**印 token、client secret、完整 payload；必要時只印 entity／xero_id／筆數 |
 
 命名：縮寫大寫（`tenantID`、`invoiceID`）、環境變數 `UPPER_SNAKE_CASE`、DB 欄位 `snake_case`、常數 PascalCase + iota；註解一律繁體中文，函數註解 ≤ 6 行。

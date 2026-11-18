@@ -76,7 +76,7 @@ func upsertBulk[T any](ctx context.Context, tx *sql.Tx, table, singleSQL string,
 			return fmt.Errorf("多列寫入: %w", err)
 		}
 		written += end - start
-		slog.Debug("多列 upsert", "table", table, "rows", end-start, "total", written)
+		slog.Debug("multi-row upsert", "table", table, "rows", end-start, "total", written)
 	}
 	return nil
 }

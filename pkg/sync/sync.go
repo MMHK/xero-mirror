@@ -160,11 +160,11 @@ func (r *Runner) Run(ctx context.Context, tenantID string, entity Entity, w Wind
 				LastRunAt:  &now,
 				Status:     "idle",
 			}); err != nil {
-				slog.Warn("更新 sync_state 失敗", "tenant", tenantID, "entity", entity, "err", err)
+				slog.Warn("update sync_state failed", "tenant", tenantID, "entity", entity, "err", err)
 			}
 		}
 	}
-	slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", a.total)
+	slog.Info("sync completed", "tenant", tenantID, "entity", entity, "count", a.total)
 	return nil
 }
 
@@ -218,7 +218,7 @@ func (r *Runner) RunBatch(ctx context.Context, tenantID string, entity Entity, i
 			return fmt.Errorf("批量同步 %s: %w", entity, err)
 		}
 	}
-	slog.Info("批量同步完成", "tenant", tenantID, "entity", entity, "ids", len(ids), "count", a.total)
+	slog.Info("batch sync completed", "tenant", tenantID, "entity", entity, "ids", len(ids), "count", a.total)
 	return nil
 }
 
@@ -254,7 +254,7 @@ func (r *Runner) RunSingle(ctx context.Context, tenantID string, entity Entity, 
 	if err := r.store.ApplyBatch(ctx, batch); err != nil {
 		return fmt.Errorf("single get %s/%s: %w", entity, id, err)
 	}
-	slog.Info("single get 同步完成", "tenant", tenantID, "entity", entity, "id", id)
+	slog.Info("single get sync completed", "tenant", tenantID, "entity", entity, "id", id)
 	return nil
 }
 
@@ -280,19 +280,19 @@ func (r *Runner) RunTenant(ctx context.Context, tenantID string) error {
 // runTenantEntities 是單一 tenant × 指定實體的增量迴圈；單一實體失敗只 Warn 續跑，
 // 全部實體都失敗才回錯，部分成功回 nil（錯誤已記 log）。
 func (r *Runner) runTenantEntities(ctx context.Context, tenantID string, entities []Entity) error {
-	slog.Info("開始 tenant 同步", "tenant", tenantID)
+	slog.Info("starting tenant sync", "tenant", tenantID)
 	failed := 0
 	for _, entity := range entities {
 		if err := r.RunIncremental(ctx, tenantID, entity); err != nil {
 			failed++
-			slog.Warn("實體同步失敗，續跑其餘實體",
+			slog.Warn("entity sync failed, continuing with remaining entities",
 				"tenant", tenantID, "entity", entity, "err", err)
 		}
 	}
 	if failed == len(entities) {
 		return fmt.Errorf("tenant %s 的全部 %d 個實體同步皆失敗", tenantID, failed)
 	}
-	slog.Info("tenant 同步結束", "tenant", tenantID, "failed", failed)
+	slog.Info("tenant sync completed", "tenant", tenantID, "failed", failed)
 	return nil
 }
 
@@ -321,10 +321,10 @@ func (r *Runner) runAllByEntities(ctx context.Context, entities []Entity) error 
 	for _, t := range tenants {
 		if err := r.runTenantEntities(ctx, t.TenantID, entities); err != nil {
 			failed++
-			slog.Warn("tenant 同步失敗，續跑下一個 tenant", "tenant", t.TenantID, "err", err)
+			slog.Warn("tenant sync failed, continuing with next tenant", "tenant", t.TenantID, "err", err)
 		}
 	}
-	slog.Info("全 tenant 增量同步結束", "tenants", len(tenants), "failed", failed)
+	slog.Info("all tenants incremental sync completed", "tenants", len(tenants), "failed", failed)
 	if failed > 0 {
 		return fmt.Errorf("同步失敗 %d 個 tenant", failed)
 	}
@@ -359,7 +359,7 @@ func (r *Runner) runAllMonthByEntities(ctx context.Context, start, end time.Time
 		for _, entity := range entities {
 			if err := r.Run(ctx, t.TenantID, entity, w); err != nil {
 				tenantFailed = true
-				slog.Warn("月度回補失敗，續跑其餘實體",
+				slog.Warn("monthly backfill failed, continuing with remaining entities",
 					"tenant", t.TenantID, "entity", entity, "err", err)
 			}
 		}
@@ -367,7 +367,7 @@ func (r *Runner) runAllMonthByEntities(ctx context.Context, start, end time.Time
 			failed++
 		}
 	}
-	slog.Info("全 tenant 月度回補結束", "tenants", len(tenants), "failed", failed)
+	slog.Info("all tenants monthly backfill completed", "tenants", len(tenants), "failed", failed)
 	if failed > 0 {
 		return fmt.Errorf("同步失敗 %d 個 tenant", failed)
 	}
@@ -438,7 +438,7 @@ func (a *pageApplier) handle(page int, body []byte) (int, error) {
 		a.maxAt = latest(a.maxAt, maxAt)
 	}
 	a.total += n
-	slog.Debug("抓取分頁", "tenant", a.tenantID, "entity", a.entity, "page", page, "count", n)
+	slog.Debug("fetching page", "tenant", a.tenantID, "entity", a.entity, "page", page, "count", n)
 	if a.pending() >= writeChunkRows {
 		// 中間 flush 也帶 cursor（因為資料已按 UpdatedDateUTC 排序）
 		// -1 秒策略，避免漏資料
@@ -477,7 +477,7 @@ func (a *pageApplier) flush(cursor *time.Time, isFinal bool) error {
 	a.batch.CreditNotes = nil
 	a.batch.Payments = nil
 	a.written += rows
-	slog.Debug("分塊寫入", "tenant", a.tenantID, "entity", a.entity,
+	slog.Debug("batch upsert", "tenant", a.tenantID, "entity", a.entity,
 		"rows", rows, "total", a.written, "with_cursor", cursor != nil, "is_final", isFinal)
 	return nil
 }

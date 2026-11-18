@@ -39,7 +39,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 			return
 		}
 		if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) {
-			slog.Warn("交易回滾失敗", "err", rerr)
+			slog.Warn("transaction rollback failed", "err", rerr)
 		}
 	}()
 	if err := fn(tx); err != nil {

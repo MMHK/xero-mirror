@@ -57,7 +57,7 @@ func (s *Store) ApplyBatch(ctx context.Context, b Batch) error {
 	if err != nil {
 		return err
 	}
-	slog.Debug("批次寫入完成", "tenant", b.TenantID, "entity", b.Entity, "count", n)
+	slog.Debug("batch write completed", "tenant", b.TenantID, "entity", b.Entity, "count", n)
 	return nil
 }
 

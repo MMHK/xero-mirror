@@ -56,7 +56,7 @@ func Authorize(ctx context.Context, st *store.Store, oauth *OAuth, cipher *Ciphe
 	if err := storeAuthTenants(writeCtx, st, cipher, oauth, token); err != nil {
 		return err
 	}
-	slog.Info("授權完成，token 已加密寫入 MySQL")
+	slog.Info("authorization completed, token encrypted and saved to MySQL")
 	return nil
 }
 
@@ -77,7 +77,7 @@ func awaitAuthorization(ctx context.Context, oauth *OAuth, state string, out io.
 		return nil, err
 	}
 	fmt.Fprintf(out, "請在瀏覽器開啟以下網址完成 Xero 授權：\n\n%s\n\n", oauth.AuthCodeURL(state))
-	slog.Info("等待授權回呼", "addr", addr)
+	slog.Info("waiting for authorization callback", "addr", addr)
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 	srv := &http.Server{
@@ -115,7 +115,7 @@ func shutdownCallbackServer(srv *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), authShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Warn("關閉授權回呼 server 失敗", "err", err)
+		slog.Warn("close authorization callback server failed", "err", err)
 	}
 }
 
@@ -185,7 +185,7 @@ func storeAuthTenants(ctx context.Context, st *store.Store, cipher *Cipher,
 		if err := st.WithTx(ctx, func(tx *sql.Tx) error { return st.UpsertTenant(ctx, tx, t) }); err != nil {
 			return fmt.Errorf("寫入 tenant %s（已完成 %d/%d 個 tenant）: %w", c.TenantID, i, len(conns), err)
 		}
-		slog.Info("tenant 授權完成", "tenant", c.TenantID, "name", c.TenantName)
+		slog.Info("tenant authorization completed", "tenant", c.TenantID, "name", c.TenantName)
 	}
 	return nil
 }

@@ -91,12 +91,12 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := readBody(r)
 	if err != nil {
-		slog.Warn("讀取 webhook body 失敗", "err", err)
+		slog.Warn("read webhook body failed", "err", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if !h.verifySignature(raw, r.Header.Get("x-xero-signature")) {
-		slog.Warn("webhook 驗簽失敗", "remote", r.RemoteAddr)
+		slog.Warn("webhook signature verification failed", "remote", r.RemoteAddr)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -107,13 +107,13 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	targets, err := parseTargets(p)
 	if err != nil {
-		slog.Warn("webhook 事件解析失敗", "err", err)
+		slog.Warn("webhook event parse failed", "err", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if err := h.enqueue(r.Context(), targets, time.Now().UTC()); err != nil {
 		// 刻意回 500 讓 Xero 重送，避免事件遺失；屬 spec §7「先回 200」的明文例外。
-		slog.Error("webhook 入列失敗", "err", err)
+		slog.Error("webhook enqueue failed", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -152,7 +152,7 @@ func parseTargets(p webhookPayload) ([]webhookTarget, error) {
 			continue
 		}
 		if e.TenantID == "" || e.ResourceID == "" {
-			slog.Warn("webhook 事件缺少 tenantId 或 resourceId，已略過",
+			slog.Warn("webhook event missing tenantId or resourceId, skipped",
 				"category", e.EventCategory, "resource", e.ResourceID)
 			continue
 		}
@@ -162,7 +162,7 @@ func parseTargets(p webhookPayload) ([]webhookTarget, error) {
 		}
 		eventType := e.EventType
 		if _, ok := webhookEventTypes[eventType]; !ok {
-			slog.Warn("webhook 未知 eventType，改記 webhook:unknown",
+			slog.Warn("webhook unknown eventType, recording as webhook:unknown",
 				"event_type", e.EventType, "resource", e.ResourceID)
 			eventType = "unknown"
 		}
@@ -175,7 +175,7 @@ func parseTargets(p webhookPayload) ([]webhookTarget, error) {
 		})
 	}
 	if skipped > 0 {
-		slog.Info("略過未支援的 webhook 分類", "count", skipped)
+		slog.Info("skipping unsupported webhook categories", "count", skipped)
 	}
 	return targets, nil
 }

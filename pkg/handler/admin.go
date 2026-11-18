@@ -57,7 +57,7 @@ func (h *AdminHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.runner.Run(r.Context(), tenant, entity, window); err != nil {
-		slog.Error("admin 手動同步失敗", "tenant", tenant, "entity", entity, "err", err)
+		slog.Error("admin manual sync failed", "tenant", tenant, "entity", entity, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "同步失敗"})
 		return
 	}
@@ -82,7 +82,7 @@ func (h *AdminHandler) buildWindow(ctx context.Context, tenant, entity, month st
 		return pkgsync.Window{Cursor: nil}, nil
 	}
 	if err != nil {
-		slog.Error("讀取 sync_state 失敗", "tenant", tenant, "entity", entity, "err", err)
+		slog.Error("read sync_state failed", "tenant", tenant, "entity", entity, "err", err)
 		return pkgsync.Window{}, err
 	}
 	return pkgsync.Window{Cursor: st.CursorTime}, nil

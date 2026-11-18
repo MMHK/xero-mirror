@@ -108,13 +108,13 @@ func runSyncMode(ctx context.Context, runner *sync.Runner, w *sync.Window, month
 	}
 	switch {
 	case w != nil && hasEntity:
-		slog.Info("sync 完成", "mode", "month", "window", month, "entity", entity)
+		slog.Info("sync completed", "mode", "month", "window", month, "entity", entity)
 	case w != nil:
-		slog.Info("sync 完成", "mode", "month", "window", month)
+		slog.Info("sync completed", "mode", "month", "window", month)
 	case hasEntity:
-		slog.Info("sync 完成", "mode", "incremental", "entity", entity)
+		slog.Info("sync completed", "mode", "incremental", "entity", entity)
 	default:
-		slog.Info("sync 完成", "mode", "incremental")
+		slog.Info("sync completed", "mode", "incremental")
 	}
 	return nil
 }
@@ -213,11 +213,11 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 // serveLoop 啟動 cron 與 HTTP server，等待關機訊號或 server 錯誤後優雅關閉。
 func serveLoop(ctx context.Context, deps *serveDeps) error {
 	deps.cron.Start()
-	slog.Info("cron 排程已啟動")
+	slog.Info("cron scheduler started")
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("HTTP server 啟動", "addr", deps.srv.Addr)
+		slog.Info("HTTP server started", "addr", deps.srv.Addr)
 		if err := deps.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -226,9 +226,9 @@ func serveLoop(ctx context.Context, deps *serveDeps) error {
 	var serveErr error
 	select {
 	case <-ctx.Done():
-		slog.Info("收到關機訊號，開始優雅關閉")
+		slog.Info("received shutdown signal, starting graceful shutdown")
 	case serveErr = <-errCh:
-		slog.Error("HTTP server 異常，開始關閉", "err", serveErr)
+		slog.Error("HTTP server error, shutting down", "err", serveErr)
 	}
 	deps.shutdown()
 	return serveErr
@@ -244,40 +244,40 @@ func (d *serveDeps) shutdown() {
 	// cron.Stop 停止排新 job，回傳的 stopCtx 會在所有執行中 job 結束時 done；
 	// 只在總關機預算內等待，逾時就取消 cronCtx，讓在飛的 cron／HTTP／DB 呼叫收斂。
 	stopCtx := d.cron.Stop()
-	slog.Info("cron 排程已停止，不再觸發新任務")
+	slog.Info("cron scheduler stopped, no new jobs will be triggered")
 	select {
 	case <-stopCtx.Done():
-		slog.Info("執行中的 cron job 已結束")
+		slog.Info("running cron jobs completed")
 	case <-shutdownCtx.Done():
-		slog.Warn("等待 cron job 逾時，取消 cron context 後繼續關閉流程")
+		slog.Warn("timeout waiting for cron jobs, canceling cron context and continuing shutdown")
 		d.cancelCron()
 	}
 
 	if err := d.srv.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("HTTP server 關閉失敗", "err", err)
+		slog.Warn("HTTP server shutdown failed", "err", err)
 	} else {
-		slog.Info("HTTP server 已關閉")
+		slog.Info("HTTP server closed")
 	}
 
 	// 等待當前處理中的 job 完成（或逾時）；shutdownCtx 只控制等待上限。
 	if err := d.queue.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("sync job queue 關閉失敗", "err", err)
+		slog.Warn("sync job queue close failed", "err", err)
 	} else {
-		slog.Info("sync job queue 已關閉")
+		slog.Info("sync job queue closed")
 	}
 
 	if err := d.db.Close(); err != nil {
-		slog.Warn("資料庫連線關閉失敗", "err", err)
+		slog.Warn("database connection close failed", "err", err)
 	} else {
-		slog.Info("資料庫連線已關閉")
+		slog.Info("database connection closed")
 	}
 }
 
 // runCronSync 是 cron 回呼：跑一輪全 tenant 五實體增量，失敗只 Warn 不中斷排程。
 func runCronSync(ctx context.Context, runner *sync.Runner) {
-	slog.Info("cron 同步開始")
+	slog.Info("cron sync started")
 	if err := runner.RunAllIncremental(ctx); err != nil {
-		slog.Warn("cron 同步未全部成功", "err", err)
+		slog.Warn("cron sync not all successful", "err", err)
 	}
 }
 

@@ -135,7 +135,7 @@ cursor_time = IF(
 呼叫端處理：
 
 - `sync` subcommand（`runSync`）原樣回傳錯誤，`main.go` 記錄後以 exit 1 結束。
-- cron（`runCronSync`）只 `slog.Warn("cron 同步未全部成功")`，不中斷排程。
+- cron（`runCronSync`）只 `slog.Warn("cron sync not all successful")`，不中斷排程。
 - webhook buffer 對 `RunBatch` 失敗只 `slog.Warn`，事件已在 `sync_jobs`，交由 cron 增量收斂。
 
 ## 6. tenant 清單

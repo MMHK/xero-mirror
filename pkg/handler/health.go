@@ -26,7 +26,7 @@ func (h *HealthHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.Ping(r.Context()); err != nil {
-		slog.Warn("健康檢查失敗", "err", err)
+		slog.Warn("health check failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unhealthy"})
 		return
 	}

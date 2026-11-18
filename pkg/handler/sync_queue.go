@@ -65,7 +65,7 @@ func (q *SyncJobQueue) loop() {
 		}
 		jobs, err := q.store.GetPendingSyncJobs(q.baseCtx, q.batchSize)
 		if err != nil {
-			slog.Warn("查詢待處理 sync_jobs 失敗", "err", err)
+			slog.Warn("query pending sync_jobs failed", "err", err)
 			if !q.sleep(q.baseCtx, q.pollInterval) {
 				return
 			}
@@ -145,7 +145,7 @@ func (q *SyncJobQueue) processBatchIDs(tenantID string, entity pkgsync.Entity, j
 	}
 	err := q.runner.RunBatch(q.baseCtx, tenantID, entity, ids)
 	if err != nil {
-		slog.Warn("批量同步失敗", "tenant", tenantID, "entity", entity, "ids", len(ids), "err", err)
+		slog.Warn("batch sync failed", "tenant", tenantID, "entity", entity, "ids", len(ids), "err", err)
 		q.markJobsFailed(jobs, err.Error())
 		return
 	}
@@ -160,7 +160,7 @@ func (q *SyncJobQueue) processSingles(tenantID string, entity pkgsync.Entity, jo
 		}
 		err := q.runner.RunSingle(q.baseCtx, tenantID, entity, j.XeroID)
 		if err != nil {
-			slog.Warn("單筆同步失敗", "tenant", tenantID, "entity", entity, "id", j.XeroID, "err", err)
+			slog.Warn("single sync failed", "tenant", tenantID, "entity", entity, "id", j.XeroID, "err", err)
 			q.markJobFailed(j, err.Error())
 			continue
 		}
@@ -181,7 +181,7 @@ func (q *SyncJobQueue) markJobDone(j store.SyncJob) {
 		return q.store.DeleteSyncJob(q.baseCtx, tx, j.ID)
 	})
 	if err != nil {
-		slog.Warn("刪除 sync_job 失敗", "id", j.ID, "err", err)
+		slog.Warn("delete sync_job failed", "id", j.ID, "err", err)
 	}
 }
 
@@ -210,6 +210,6 @@ func (q *SyncJobQueue) markJobFailed(j store.SyncJob, errMsg string) {
 		})
 	})
 	if err != nil {
-		slog.Warn("處理失敗 sync_job 失敗", "id", j.ID, "err", err)
+		slog.Warn("move to failed_sync_jobs failed", "id", j.ID, "err", err)
 	}
 }

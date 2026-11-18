@@ -2,7 +2,7 @@
 
 本文件是專案的行為合約。所有 AI 產生的程式碼必須遵守；違反任一「強制」規則 → 立即改寫。
 
-回覆語言：**繁體中文**（程式碼註解、log 訊息、`doc/` 文件一律繁體中文；識別字用英文）。
+回覆語言：**繁體中文**（程式碼註解、`doc/` 文件一律繁體中文；log 訊息一律英文；識別字用英文）。
 
 ---
 
@@ -107,7 +107,7 @@ repo 已有完整 scaffold、migration、store、xero client、sync 核心、web
 
 ### 日誌
 - 一律 stdlib `log/slog`，禁止 logrus/zap/`log.Printf`。
-- log 訊息用繁體中文，帶結構化欄位：`slog.Info("同步完成", "tenant", tenantID, "entity", entity, "count", n)`。
+- log 訊息用英文，帶結構化欄位：`slog.Info("sync completed", "tenant", tenantID, "entity", entity, "count", n)`。
 - 不得把 token、client secret、完整 payload 寫進 log。
 
 ### 命名

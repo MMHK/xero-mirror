@@ -174,7 +174,7 @@ func (s *Store) ApplyBatch(ctx context.Context, b Batch) error {
     if err != nil {
         return err
     }
-    slog.Debug("批次寫入完成", "tenant", b.TenantID, "entity", b.Entity, "count", n)
+    slog.Debug("batch write completed", "tenant", b.TenantID, "entity", b.Entity, "count", n)
     return nil
 }
 ```
@@ -217,7 +217,7 @@ if r.store != nil {
             LastRunAt: &now,
             Status:   "idle",
         }); err != nil {
-            slog.Warn("更新 sync_state 失敗", "tenant", tenantID, "entity", entity, "err", err)
+            slog.Warn("update sync_state failed", "tenant", tenantID, "entity", entity, "err", err)
         }
     }
 }
