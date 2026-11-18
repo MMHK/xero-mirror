@@ -8,87 +8,8 @@ on:
 permissions:
   contents: write
 
-env:
-  IMAGE_NAME: mmhk/xero-mirror
-
 jobs:
-  # ── Job 1: 各架構原生建構 ──
-  build:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            platform: linux/amd64
-          - runner: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
-            platform: linux/arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-
-      - name: GoReleaser cross-compile
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: build --single-target --clean --snapshot
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-
-      - name: Prepare Docker context
-        run: |
-          mkdir -p .docker-context
-          cp dist/xero-mirror_${{ matrix.goos }}_${{ matrix.goarch }}*/xero-mirror .docker-context/xero-mirror
-          cp Dockerfile.goreleaser .docker-context/Dockerfile
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build & push platform image
-        run: |
-          TAG="${GITHUB_REF_NAME}-${{ matrix.goarch }}"
-          docker buildx build --load --platform ${{ matrix.platform }} -t ${IMAGE_NAME}:${TAG} .docker-context/
-          docker push ${IMAGE_NAME}:${TAG}
-
-  # ── Job 2: 合併 multi-arch manifest ──
-  manifest:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Create & push manifests
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          # 版本 manifest
-          docker manifest create ${IMAGE_NAME}:${TAG} \
-            --amend ${IMAGE_NAME}:${TAG}-amd64 \
-            --amend ${IMAGE_NAME}:${TAG}-arm64
-          docker manifest push ${IMAGE_NAME}:${TAG}
-          # latest manifest
-          docker manifest create ${IMAGE_NAME}:latest \
-            --amend ${IMAGE_NAME}:${TAG}-amd64 \
-            --amend ${IMAGE_NAME}:${TAG}-arm64
-          docker manifest push ${IMAGE_NAME}:latest
-
-  # ── Job 3: GitHub Release（checksums + changelog）──
-  github-release:
-    needs: build
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,8 +20,18 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: GoReleaser release
-        uses: goreleaser/goreleaser-action@v6
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: latest

@@ -1,5 +1,5 @@
 # GoReleaser 設定 for xero-mirror
-# GoReleaser 只管 cross-compile + release，Docker 由 CI workflow 處理
+# 完整方案：cross-compile + Docker multi-arch + GitHub Release
 
 version: 2
 
@@ -26,6 +26,47 @@ builds:
 archives:
   - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+
+# ── Docker：各平台獨立 image ──
+dockers:
+  - id: amd64
+    dockerfile: Dockerfile.goreleaser
+    goos: linux
+    goarch: amd64
+    use: buildx
+    image_templates:
+      - "mmhk/xero-mirror:{{ .Tag }}-amd64"
+      - "mmhk/xero-mirror:latest-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+
+  - id: arm64
+    dockerfile: Dockerfile.goreleaser
+    goos: linux
+    goarch: arm64
+    use: buildx
+    image_templates:
+      - "mmhk/xero-mirror:{{ .Tag }}-arm64"
+      - "mmhk/xero-mirror:latest-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+
+# ── Docker manifest：合併 multi-arch image ──
+docker_manifests:
+  - name_template: "mmhk/xero-mirror:{{ .Tag }}"
+    image_templates:
+      - "mmhk/xero-mirror:{{ .Tag }}-amd64"
+      - "mmhk/xero-mirror:{{ .Tag }}-arm64"
+  - name_template: "mmhk/xero-mirror:latest"
+    image_templates:
+      - "mmhk/xero-mirror:latest-amd64"
+      - "mmhk/xero-mirror:latest-arm64"
 
 checksum:
   name_template: "checksums.txt"
