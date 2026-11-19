@@ -82,8 +82,9 @@
 
 </main>
 
-<script src="https://unpkg.com/petite-vue"></script>
-<script>
+<script type="module">
+import { createApp } from 'https://unpkg.com/petite-vue?module'
+
 function SetupApp() {
   return {
     loading: true,
@@ -135,6 +136,8 @@ function SetupApp() {
     },
   }
 }
+
+createApp({ SetupApp }).mount()
 </script>
 </body>
 </html>
