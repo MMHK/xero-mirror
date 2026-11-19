@@ -46,10 +46,62 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Docker 內部 MySQL 連線（覆寫 .env 的 127.0.0.1:3307）
-      MYSQL_DSN: root:root@tcp(mysql:3306)/xero_mirror?parseTime=true&loc=UTC
-      # container 內監聽所有介面
-      HTTP_ADDR: ":8080"
+      # Xero app 的 client id（必填）
+      XERO_CLIENT_ID: ${XERO_CLIENT_ID:-}
+      
+      # Xero app 的 client secret（必填）
+      XERO_CLIENT_SECRET: ${XERO_CLIENT_SECRET:-}
+      
+      # 授權回呼網址（必填，Docker 環境需要對應 host 的 port）
+      XERO_REDIRECT_URI: ${XERO_REDIRECT_URI:-}
+      
+      # webhook signing key（必填）
+      XERO_WEBHOOK_KEY: ${XERO_WEBHOOK_KEY:-}
+      
+      # AES-256-GCM 金鑰（必填，32 bytes base64）
+      XERO_TOKEN_ENC_KEY: ${XERO_TOKEN_ENC_KEY:-}
+      
+      # MySQL 連線（Docker 環境預設連 mysql:3306，覆寫 .env 的 127.0.0.1:3307）
+      MYSQL_DSN: ${MYSQL_DSN:-root:root@tcp(mysql:3306)/xero_mirror?parseTime=true&loc=UTC}
+      
+      # cron 排程（選用）
+      SYNC_CRON: ${SYNC_CRON:-}
+      
+      # HTTP 監聽位址（容器內預設 :8080）
+      HTTP_ADDR: ${HTTP_ADDR:-:8080}
+      
+      # 每 tenant 每日 Xero API 呼叫上限（預設 1000）
+      XERO_DAILY_CALL_LIMIT: ${XERO_DAILY_CALL_LIMIT:-1000}
+      
+      # sync job queue 每次 poll 上限（預設 100）
+      SYNC_JOB_BATCH_SIZE: ${SYNC_JOB_BATCH_SIZE:-100}
+      
+      # sync job queue 空佇列等待間隔毫秒（預設 5000）
+      SYNC_JOB_POLL_INTERVAL: ${SYNC_JOB_POLL_INTERVAL:-5000}
+      
+      # 日誌等級（預設 info）
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+      # 是否啟用 Swagger 文件端點（預設 false）
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      
+      # Zoho Auth Gate（預設 false）
+      ZOHO_AUTH_ENABLED: ${ZOHO_AUTH_ENABLED:-false}
+      
+      # Zoho OAuth Client ID（ZOHO_AUTH_ENABLED=true 時必填）
+      ZOHO_CLIENT_ID: ${ZOHO_CLIENT_ID:-}
+      
+      # Zoho OAuth Client Secret（ZOHO_AUTH_ENABLED=true 時必填）
+      ZOHO_CLIENT_SECRET: ${ZOHO_CLIENT_SECRET:-}
+      
+      # Zoho Accounts domain（預設 accounts.zoho.com）
+      ZOHO_ACCOUNTS_DOMAIN: ${ZOHO_ACCOUNTS_DOMAIN:-accounts.zoho.com}
+      
+      # 允許登入的 email domain 清單（逗號分隔）
+      ZOHO_ALLOWED_DOMAINS: ${ZOHO_ALLOWED_DOMAINS:-}
+      
+      # Session cookie 簽名金鑰（ZOHO_AUTH_ENABLED=true 時必填，32 bytes base64）
+      ZOHO_SESSION_SECRET: ${ZOHO_SESSION_SECRET:-}
 
 volumes:
   mysql-data:

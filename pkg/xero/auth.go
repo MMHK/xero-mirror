@@ -53,7 +53,7 @@ func Authorize(ctx context.Context, st *store.Store, oauth *OAuth, cipher *Ciphe
 	}
 	writeCtx, cancelWrite := context.WithTimeout(ctx, authWriteTimeout)
 	defer cancelWrite()
-	if err := storeAuthTenants(writeCtx, st, cipher, oauth, token); err != nil {
+	if err := StoreAuthTenants(writeCtx, st, cipher, oauth, token); err != nil {
 		return err
 	}
 	slog.Info("authorization completed, token encrypted and saved to MySQL")
@@ -161,10 +161,10 @@ func sendErr(errCh chan<- error, err error) {
 	}
 }
 
-// storeAuthTenants 以 access token 查詢授權的 tenant，逐 tenant 加密 token 並寫入 MySQL；
+// StoreAuthTenants 以 access token 查詢授權的 tenant，逐 tenant 加密 token 並寫入 MySQL；
 // 未取得任何 tenant 或缺少 refresh token 都視為授權失敗。
 // 寫入失敗時回報已完成數量，方便判斷哪些 tenant 已落地。
-func storeAuthTenants(ctx context.Context, st *store.Store, cipher *Cipher,
+func StoreAuthTenants(ctx context.Context, st *store.Store, cipher *Cipher,
 	oauth *OAuth, tok *Token) error {
 	if tok.RefreshToken == "" {
 		return errors.New("授權回應未帶 refresh token，無法離線存取；請確認已要求 offline_access")

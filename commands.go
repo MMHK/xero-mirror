@@ -204,11 +204,43 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 	}
 
 	queue := handler.NewSyncJobQueue(queueCtx, runner, st, cfg.SyncJobBatchSize, cfg.SyncJobPollInterval)
+	
+	// 建立 cipher（用於 Xero Auth handler）
+	cipher, err := xero.NewCipher(cfg.TokenEncKey)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("建立 token 加密器失敗: %w", err)
+	}
+	
+	// 建立靜態檔案 handler
+	staticHandler := handler.NewStaticHandler(os.DirFS("web"), cfg.SwaggerEnabled)
+	
+	// 建立 Setup API handler
+	setupAPIHandler := handler.NewSetupAPIHandler(st, cfg.ClientID)
+	
+	// 建立 Xero Auth handler
+	xeroAuthHandler := handler.NewXeroAuthHandler(st, cipher, cfg.ClientID, cfg.ClientSecret)
+	
+	// 建立 Zoho Auth handler（可為 nil）
+	var zohoAuthHandler *handler.ZohoAuthHandler
+	if cfg.ZohoAuthEnabled {
+		zohoAuthHandler = handler.NewZohoAuthHandler(handler.ZohoAuthConfig{
+			ClientID:       cfg.ZohoClientID,
+			ClientSecret:   cfg.ZohoClientSecret,
+			AccountsDomain: cfg.ZohoAccountsDomain,
+			AllowedDomains: cfg.ZohoAllowedDomains,
+			SessionSecret:  cfg.ZohoSessionSecret,
+		})
+	}
+	
 	mux := handler.NewMux(
 		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey)),
 		handler.NewHealthHandler(st),
 		handler.NewStatusHandler(st),
-		handler.NewPageHandler(cfg.SwaggerEnabled),
+		staticHandler,
+		setupAPIHandler,
+		xeroAuthHandler,
+		zohoAuthHandler,
 	)
 	// SkipIfStillRunning：上一輪同步還在跑時跳過本輪，避免長同步與下一輪 cron 重疊。
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))

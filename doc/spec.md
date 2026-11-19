@@ -320,22 +320,32 @@ type SyncJobQueue struct {
 | `POST` | `/webhook` | Xero 回呼 | HMAC-SHA256 驗簽；成功 `200`、簽章錯 `401`、body 不合法 `400` |
 | `GET` | `/health` | 健康檢查 | DB ping 正常 `200`（body `{"status":"ok"}`），異常 `503`（`{"status":"unhealthy"}`） |
 | `GET` | `/` | 介紹頁 | 靜態 `text/html`；非 `/` 的未知路徑回 `404` |
+| `GET` | `/setup` | Xero App Setup 頁面 | petite-vue SPA，動態載入 `/api/setup/*`；受 Zoho Auth 保護（若啟用） |
 | `GET` | `/swagger` | Swagger UI | 靜態 `text/html`，由 CDN 載入 swagger-ui-dist 並讀 `/openapi.json`；受 `SWAGGER_ENABLED` 控制（預設 `false`），關閉時回 `404` |
 | `GET` | `/openapi.json` | OpenAPI 文件 | `application/json`；OpenAPI 3.0.3，契約與本節一致；受 `SWAGGER_ENABLED` 控制，關閉時回 `404` |
-| `GET` | `/api/status/sync` | 同步狀態 | 查詢各 tenant × entity 的 `sync_state`；可選 `tenant`／`entity` 查詢參數過濾 |
-| `GET` | `/api/status/jobs` | 同步佇列統計 | 回傳 `sync_jobs` 的 pending／processing／failed／total 計數 |
-| `GET` | `/api/status/tenants` | Tenant 狀態 | 合併 tenant 資訊（`auth_status`、`token_expiry`）與 rate limit 快照（`day_limit_remaining` 等） |
-| `GET` | `/api/status/webhooks` | Webhook 事件統計 | 回傳 `webhook_events` 的 pending／processed／total 計數（`processed_at` 為 `NULL` 即 pending） |
+| `GET` | `/api/setup/config` | Xero App 配置資訊 | 回傳 webhook URL、redirect URI、client ID（根據 request host 動態推演）；受 Zoho Auth 保護（若啟用） |
+| `GET` | `/api/setup/status` | Xero 授權狀態 | 回傳 tenant 清單與授權狀態；受 Zoho Auth 保護（若啟用） |
+| `POST` | `/api/auth/xero/start` | 啟動 Xero OAuth | 產生 state 並回傳 authorize URL；受 Zoho Auth 保護（若啟用） |
+| `GET` | `/callback` | Xero OAuth 回調 | 接收 Xero 授權碼，交換 token 並寫入 DB，302 重導到 `/setup` |
+| `GET` | `/login` | 啟動 Zoho OAuth | 產生 state 並 302 重導到 Zoho 授權頁；僅當 `ZOHO_AUTH_ENABLED=true` 時存在 |
+| `GET` | `/oauth/zoho/callback` | Zoho OAuth 回調 | 接收 Zoho 授權碼，驗證 email，設定 session cookie，302 重導到 `/setup`；僅當 `ZOHO_AUTH_ENABLED=true` 時存在 |
+| `GET` | `/logout` | 登出 | 清除 session cookie，302 重導到 `/`；僅當 `ZOHO_AUTH_ENABLED=true` 時存在 |
+| `GET` | `/api/status/sync` | 同步狀態 | 查詢各 tenant × entity 的 `sync_state`；可選 `tenant`／`entity` 查詢參數過濾；受 Zoho Auth 保護（若啟用） |
+| `GET` | `/api/status/jobs` | 同步佇列統計 | 回傳 `sync_jobs` 的 pending／processing／failed／total 計數；受 Zoho Auth 保護（若啟用） |
+| `GET` | `/api/status/tenants` | Tenant 狀態 | 合併 tenant 資訊（`auth_status`、`token_expiry`）與 rate limit 快照（`day_limit_remaining` 等）；受 Zoho Auth 保護（若啟用） |
+| `GET` | `/api/status/webhooks` | Webhook 事件統計 | 回傳 `webhook_events` 的 pending／processed／total 計數（`processed_at` 為 `NULL` 即 pending）；受 Zoho Auth 保護（若啟用） |
 
 - 本服務端點**只允許** `GET`／`POST`；其他方法（`PUT`／`PATCH`／`DELETE`）一律回 `405 Method Not Allowed`，並帶 `Allow` header 標示允許的方法；未知路徑回 `404`。
 - `/health` 只做 `store.Ping`：成功回 JSON `{"status":"ok"}`，失敗先 `slog.Warn` 再回 `{"status":"unhealthy"}`。
-- `/api/status/*` 路由無內建認證，假設部署於內網或反向代理後方；只讀取 DB 狀態，不觸發同步或寫入。
+- `/api/status/*` 與 `/api/setup/*` 路由受 Zoho Auth 保護（若 `ZOHO_AUTH_ENABLED=true`）；未啟用時假設部署於內網或反向代理後方；只讀取 DB 狀態，不觸發同步或寫入。
 - 此限制只針對本服務提供的端點；呼叫 Xero API 照 Xero 要求（例如註冊 webhook 是 `PUT /webhooks`）。
-- 頁面路由（`/`、`/swagger`、`/openapi.json`）一律只允許 `GET`，其他方法回 `405 Method Not Allowed` 並帶 `Allow: GET`。
+- 頁面路由（`/`、`/setup`、`/swagger`、`/openapi.json`）一律只允許 `GET`，其他方法回 `405 Method Not Allowed` 並帶 `Allow: GET`。
 - `GET /` 是 `ServeMux` 的 catch-all，handler 必須以 `r.URL.Path == "/"` 精確判斷；其餘未知路徑回 `404`，不得回介紹頁。
-- 頁面路由由 `pkg/handler/page.go` 的 `PageHandler` 提供，資產以 `//go:embed`（`pkg/handler/home.html`、`docs.html`、`openapi.json`）打包進 binary，**不新增 Go 依賴**。
-- `PageHandler` 先判斷方法再判斷路徑，故未註冊路徑的非 `GET` 請求回 `405`，`GET` 未註冊路徑回 `404`。
+- 頁面路由由 `pkg/handler/static.go` 的 `StaticHandler` 提供，資產以 `os.DirFS("web")` 或 `embed.FS` 打包進 binary，**不新增 Go 依賴**。
+- `StaticHandler` 先判斷方法再判斷路徑，故未註冊路徑的非 `GET` 請求回 `405`，`GET` 未註冊路徑回 `404`。
 - Swagger UI（`swagger-ui-dist@5`）以 jsDelivr CDN 載入：內網無外網時頁面只缺工具，`/openapi.json` 與既有 API 端點不受影響；頁面本身不含認證。
+- `/setup` 頁面使用 petite-vue（~6KB CDN），動態載入 `/api/setup/config` 與 `/api/setup/status`，顯示 Xero App 配置資訊與授權狀態。
+- Zoho Auth Gate 為選用功能（`ZOHO_AUTH_ENABLED=true` 時啟用），使用 signed cookie（HMAC-SHA256）管理 session，有效期 24 小時。未啟用時所有 API 路由直接放行。
 
 ## 8. 環境變數
 
@@ -356,6 +366,12 @@ type SyncJobQueue struct {
 | `SYNC_JOB_POLL_INTERVAL` | 選用；sync job queue 佇列為空時的等待間隔（毫秒），未設定時預設 5000 |
 | `LOG_LEVEL` | 選用；日誌等級 `debug`／`info`／`warn`／`error`（大小寫不敏感），未設定時預設 `info`；非法值啟動即報錯 |
 | `SWAGGER_ENABLED` | 選用；是否開放 `/swagger` 與 `/openapi.json`（`"true"` / `"false"`，大小寫不敏感），未設定時預設 `false`；關閉時兩路由回 `404` |
+| `ZOHO_AUTH_ENABLED` | 選用；是否啟用 Zoho Auth Gate 保護敏感路由（`"true"` / `"false"`，大小寫不敏感），未設定時預設 `false`；啟用時需同時設定 `ZOHO_CLIENT_ID`、`ZOHO_CLIENT_SECRET`、`ZOHO_SESSION_SECRET` |
+| `ZOHO_CLIENT_ID` | `ZOHO_AUTH_ENABLED=true` 時必填；Zoho OAuth Client ID |
+| `ZOHO_CLIENT_SECRET` | `ZOHO_AUTH_ENABLED=true` 時必填；Zoho OAuth Client Secret |
+| `ZOHO_ACCOUNTS_DOMAIN` | 選用；Zoho Accounts domain，未設定時預設 `accounts.zoho.com`；支援 `.com.cn`/`.eu`/`.in`/`.com.au` 等區域 |
+| `ZOHO_ALLOWED_DOMAINS` | 選用；允許登入的 email domain 清單（逗號分隔），未設定時允許任何已認證的 Zoho 使用者 |
+| `ZOHO_SESSION_SECRET` | `ZOHO_AUTH_ENABLED=true` 時必填；32 bytes base64（session cookie HMAC-SHA256 簽名金鑰） |
 
 新增變數固定三步：`pkg/config` 讀取並驗證 → 補 `.env.example` → 更新本文件。
 

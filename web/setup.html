@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xero App 配置 — xero-mirror</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>[v-cloak] { display: none }</style>
+</head>
+<body class="bg-[#f6f8fa] font-sans text-[#1f2328] antialiased">
+
+<header class="border-b border-[#d1d9e0] bg-white">
+  <div class="mx-auto flex h-16 max-w-5xl items-center justify-between px-6">
+    <a href="/" class="flex items-center gap-2">
+      <span class="rounded-md bg-[#1f2328] px-2 py-0.5 font-mono text-xs text-white">xm</span>
+      <span class="text-[15px] font-semibold">xero-mirror</span>
+      <span class="hidden text-sm font-normal text-[#59636e] sm:inline">Xero → MySQL</span>
+    </a>
+  </div>
+</header>
+
+<main class="mx-auto max-w-5xl space-y-6 px-6 py-10" v-scope="SetupApp()" @vue:mounted="mounted" v-cloak>
+
+  <!-- 授權狀態 -->
+  <section class="rounded-lg border border-[#d1d9e0] bg-white p-6">
+    <h2 class="text-base font-semibold">授權狀態</h2>
+    <div v-if="loading" class="mt-3 text-sm text-[#59636e]">載入中...</div>
+    <div v-else-if="!tenants.length" class="mt-3 rounded-md border border-[#d1d9e0] bg-[#f6f8fa] p-4">
+      <p class="text-sm text-[#59636e]">尚未授權任何 Xero 組織</p>
+      <button @click="startXeroAuth"
+              class="mt-3 rounded-md bg-[#1f2328] px-4 py-2 text-sm font-medium text-white hover:bg-[#383f47]">
+        開始授權
+      </button>
+    </div>
+    <div v-else class="mt-3 space-y-3">
+      <div v-for="t in tenants" :key="t.tenant_id"
+           class="flex items-center justify-between rounded-md border border-[#d1d9e0] bg-[#f6f8fa] p-4">
+        <div>
+          <p class="font-medium">{{ t.tenant_name }}</p>
+          <p class="mt-0.5 font-mono text-xs text-[#59636e]">{{ t.tenant_id }}</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span v-if="t.auth_status === 'active'"
+                class="rounded-full bg-[#dafbe1] px-2 py-0.5 text-xs font-medium text-[#1a7f37]">已授權</span>
+          <span v-else
+                class="rounded-full bg-[#ffd7d5] px-2 py-0.5 text-xs font-medium text-[#cf222e]">需要重新授權</span>
+          <span v-if="t.token_expiry" class="text-xs text-[#59636e]">Token 過期：{{ t.token_expiry }}</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 配置資訊：Webhook URL / Redirect URI / Client ID -->
+  <section v-for="field in fields" :key="field.key"
+           class="rounded-lg border border-[#d1d9e0] bg-white p-6">
+    <h2 class="text-base font-semibold">{{ field.label }}</h2>
+    <p class="mt-1 text-sm text-[#59636e]">{{ field.desc }}</p>
+    <div class="mt-3 flex items-center gap-2">
+      <code class="flex-1 rounded-md border border-[#d1d9e0] bg-[#f6f8fa] px-3 py-2 font-mono text-sm break-all">
+        {{ config[field.key] || '載入中...' }}
+      </code>
+      <button @click="copy(config[field.key], $event)"
+              class="shrink-0 rounded-md border border-[#d1d9e0] bg-white px-3 py-2 text-sm font-medium hover:bg-[#f6f8fa]">
+        複製
+      </button>
+    </div>
+  </section>
+
+  <!-- Webhook Signing Key 提示 -->
+  <section class="rounded-lg border border-[#e8d44d] bg-[#fff8e5] p-6">
+    <h2 class="text-base font-semibold">⚠️ Webhook Signing Key</h2>
+    <p class="mt-2 text-sm text-[#59636e]">
+      請到 Xero App 設定頁複製 Webhook Signing Key，並設定到環境變數
+      <code class="rounded bg-[#f6f8fa] px-1.5 py-0.5 font-mono text-xs">XERO_WEBHOOK_KEY</code>。
+    </p>
+  </section>
+
+  <footer class="border-t border-[#d1d9e0] py-6 text-xs text-[#59636e]">
+    <span class="font-mono font-semibold">xero-mirror</span>
+    <span class="ml-2">本服務僅供內網部署；專案文件見 repo 的 <span class="font-mono">doc/</span>，程式碼遵循 <span class="font-mono">AGENTS.md</span>。</span>
+  </footer>
+
+</main>
+
+<script src="https://unpkg.com/petite-vue"></script>
+<script>
+function SetupApp() {
+  return {
+    loading: true,
+    tenants: [],
+    config: {},
+    fields: [
+      { key: 'webhook_url', label: 'Webhook URL', desc: 'Xero 事件推送到此 URL' },
+      { key: 'redirect_uri', label: 'Redirect URI', desc: 'OAuth 授權完成後回調到此 URL' },
+      { key: 'client_id', label: 'Client ID', desc: '你的 Xero App Client ID' },
+    ],
+    async mounted() {
+      try {
+        const [cfgRes, statusRes] = await Promise.all([
+          fetch('/api/setup/config'),
+          fetch('/api/setup/status'),
+        ])
+        if (cfgRes.ok) {
+          this.config = await cfgRes.json()
+        }
+        if (statusRes.ok) {
+          const status = await statusRes.json()
+          this.tenants = status.tenants || []
+        }
+      } catch (e) {
+        console.error('Failed to load setup data:', e)
+      } finally {
+        this.loading = false
+      }
+    },
+    async startXeroAuth() {
+      try {
+        const res = await fetch('/api/auth/xero/start', { method: 'POST' })
+        const data = await res.json()
+        if (data.authorize_url) {
+          window.location.href = data.authorize_url
+        }
+      } catch (e) {
+        console.error('Failed to start Xero auth:', e)
+      }
+    },
+    copy(text, e) {
+      if (!text) return
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = e.target
+        const orig = btn.textContent
+        btn.textContent = '已複製'
+        setTimeout(() => { btn.textContent = orig }, 1500)
+      })
+    },
+  }
+}
+</script>
+</body>
+</html>

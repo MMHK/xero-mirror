@@ -56,6 +56,18 @@ type Config struct {
 	LogLevel slog.Level
 	// SwaggerEnabled 控制是否啟用 Swagger 文件端點，由 SWAGGER_ENABLED 解析；預設關閉。
 	SwaggerEnabled bool
+	// ZohoAuthEnabled 控制是否啟用 Zoho Auth Gate。
+	ZohoAuthEnabled bool
+	// ZohoClientID 是 Zoho OAuth Client ID。
+	ZohoClientID string
+	// ZohoClientSecret 是 Zoho OAuth Client Secret。
+	ZohoClientSecret string
+	// ZohoAccountsDomain 是 Zoho Accounts domain（預設 accounts.zoho.com）。
+	ZohoAccountsDomain string
+	// ZohoAllowedDomains 是允許登入的 email domain 清單（逗號分隔）。
+	ZohoAllowedDomains []string
+	// ZohoSessionSecret 是 session cookie 簽名金鑰（32 bytes）。
+	ZohoSessionSecret []byte
 }
 
 // Load 讀取並驗證設定；.env 存在才載入，不存在則直接使用環境變數。
@@ -96,6 +108,12 @@ func Load() (*Config, error) {
 		SyncJobPollInterval: time.Duration(opt.syncJobPollIntervalMs) * time.Millisecond,
 		LogLevel:            opt.logLevel,
 		SwaggerEnabled:      opt.swaggerEnabled,
+		ZohoAuthEnabled:     opt.zohoAuthEnabled,
+		ZohoClientID:        opt.zohoClientID,
+		ZohoClientSecret:    opt.zohoClientSecret,
+		ZohoAccountsDomain:  opt.zohoAccountsDomain,
+		ZohoAllowedDomains:  opt.zohoAllowedDomains,
+		ZohoSessionSecret:   opt.zohoSessionSecret,
 	}, nil
 }
 
@@ -119,6 +137,12 @@ type optionalSettings struct {
 	syncJobPollIntervalMs int
 	logLevel              slog.Level
 	swaggerEnabled        bool
+	zohoAuthEnabled       bool
+	zohoClientID          string
+	zohoClientSecret      string
+	zohoAccountsDomain    string
+	zohoAllowedDomains    []string
+	zohoSessionSecret     []byte
 }
 
 // parseOptionalSettings 解析選用變數；任一格式錯誤即回錯，未設定則採預設。
@@ -139,6 +163,36 @@ func parseOptionalSettings() (optionalSettings, error) {
 	}
 	if s.swaggerEnabled, err = parseSwaggerEnabled(os.Getenv("SWAGGER_ENABLED")); err != nil {
 		return s, err
+	}
+	if s.zohoAuthEnabled, err = parseZohoAuthEnabled(os.Getenv("ZOHO_AUTH_ENABLED")); err != nil {
+		return s, err
+	}
+	if s.zohoAuthEnabled {
+		s.zohoClientID = os.Getenv("ZOHO_CLIENT_ID")
+		if s.zohoClientID == "" {
+			return s, fmt.Errorf("ZOHO_AUTH_ENABLED=true 時必須設定 ZOHO_CLIENT_ID")
+		}
+		s.zohoClientSecret = os.Getenv("ZOHO_CLIENT_SECRET")
+		if s.zohoClientSecret == "" {
+			return s, fmt.Errorf("ZOHO_AUTH_ENABLED=true 時必須設定 ZOHO_CLIENT_SECRET")
+		}
+		s.zohoAccountsDomain = os.Getenv("ZOHO_ACCOUNTS_DOMAIN")
+		if s.zohoAccountsDomain == "" {
+			s.zohoAccountsDomain = "accounts.zoho.com"
+		}
+		if domains := os.Getenv("ZOHO_ALLOWED_DOMAINS"); domains != "" {
+			s.zohoAllowedDomains = strings.Split(domains, ",")
+			for i := range s.zohoAllowedDomains {
+				s.zohoAllowedDomains[i] = strings.TrimSpace(s.zohoAllowedDomains[i])
+			}
+		}
+		secret := os.Getenv("ZOHO_SESSION_SECRET")
+		if secret == "" {
+			return s, fmt.Errorf("ZOHO_AUTH_ENABLED=true 時必須設定 ZOHO_SESSION_SECRET")
+		}
+		if s.zohoSessionSecret, err = decodeZohoSessionSecret(secret); err != nil {
+			return s, err
+		}
 	}
 	return s, nil
 }
@@ -263,4 +317,28 @@ func parseSwaggerEnabled(raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("SWAGGER_ENABLED 必須是 true|false（目前 %q）", raw)
 	}
+}
+
+// parseZohoAuthEnabled 解析 ZOHO_AUTH_ENABLED（大小寫不敏感）；未設定時預設關閉。
+func parseZohoAuthEnabled(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("ZOHO_AUTH_ENABLED 必須是 true|false（目前 %q）", raw)
+	}
+}
+
+// decodeZohoSessionSecret 將 base64 金鑰解成 32 bytes；長度不符即回錯誤。
+func decodeZohoSessionSecret(raw string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("ZOHO_SESSION_SECRET 不是合法 base64: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("ZOHO_SESSION_SECRET 必須是 32 bytes（目前 %d bytes）", len(key))
+	}
+	return key, nil
 }

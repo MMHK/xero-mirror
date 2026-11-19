@@ -75,7 +75,7 @@ func TestStoreAuthTenantsStoresTenant(t *testing.T) {
 
 	tok, err := oauth.Exchange(ctx, <-codeCh)
 	require.NoError(t, err)
-	require.NoError(t, storeAuthTenants(ctx, st, cipher, oauth, tok))
+	require.NoError(t, StoreAuthTenants(ctx, st, cipher, oauth, tok))
 
 	tenant, err := st.GetTenant(ctx, "tenant-1")
 	require.NoError(t, err)
@@ -96,7 +96,7 @@ func TestStoreAuthTenantsRejectsMissingRefresh(t *testing.T) {
 	cipher, err := NewCipher(make([]byte, 32))
 	require.NoError(t, err)
 
-	require.Error(t, storeAuthTenants(ctx, st, cipher, oauth, tok))
+	require.Error(t, StoreAuthTenants(ctx, st, cipher, oauth, tok))
 	_, err = st.GetTenant(ctx, "tenant-1")
 	require.ErrorIs(t, err, sql.ErrNoRows)
 }
@@ -112,7 +112,7 @@ func TestStoreAuthTenantsWritesMultipleTenants(t *testing.T) {
 	cipher, err := NewCipher(make([]byte, 32))
 	require.NoError(t, err)
 
-	require.NoError(t, storeAuthTenants(ctx, st, cipher, oauth, tok))
+	require.NoError(t, StoreAuthTenants(ctx, st, cipher, oauth, tok))
 
 	for _, id := range []string{"tenant-1", "tenant-2"} {
 		tenant, err := st.GetTenant(ctx, id)
