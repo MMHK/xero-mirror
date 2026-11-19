@@ -213,7 +213,7 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 	}
 	
 	// 建立靜態檔案 handler
-	staticHandler := handler.NewStaticHandler(os.DirFS("web"), cfg.SwaggerEnabled)
+	staticHandler := handler.NewStaticHandler(os.DirFS(cfg.WebDir), cfg.SwaggerEnabled)
 	
 	// 建立 Setup API handler
 	setupAPIHandler := handler.NewSetupAPIHandler(st, cfg.ClientID)

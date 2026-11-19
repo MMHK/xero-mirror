@@ -56,6 +56,8 @@ type Config struct {
 	LogLevel slog.Level
 	// SwaggerEnabled 控制是否啟用 Swagger 文件端點，由 SWAGGER_ENABLED 解析；預設關閉。
 	SwaggerEnabled bool
+	// WebDir 是靜態檔案目錄路徑，由 WEB_DIR 解析；預設為 "web"。
+	WebDir string
 	// ZohoAuthEnabled 控制是否啟用 Zoho Auth Gate。
 	ZohoAuthEnabled bool
 	// ZohoClientID 是 Zoho OAuth Client ID。
@@ -108,6 +110,7 @@ func Load() (*Config, error) {
 		SyncJobPollInterval: time.Duration(opt.syncJobPollIntervalMs) * time.Millisecond,
 		LogLevel:            opt.logLevel,
 		SwaggerEnabled:      opt.swaggerEnabled,
+		WebDir:              opt.webDir,
 		ZohoAuthEnabled:     opt.zohoAuthEnabled,
 		ZohoClientID:        opt.zohoClientID,
 		ZohoClientSecret:    opt.zohoClientSecret,
@@ -137,6 +140,7 @@ type optionalSettings struct {
 	syncJobPollIntervalMs int
 	logLevel              slog.Level
 	swaggerEnabled        bool
+	webDir                string
 	zohoAuthEnabled       bool
 	zohoClientID          string
 	zohoClientSecret      string
@@ -164,6 +168,7 @@ func parseOptionalSettings() (optionalSettings, error) {
 	if s.swaggerEnabled, err = parseSwaggerEnabled(os.Getenv("SWAGGER_ENABLED")); err != nil {
 		return s, err
 	}
+	s.webDir = parseWebDir(os.Getenv("WEB_DIR"))
 	if s.zohoAuthEnabled, err = parseZohoAuthEnabled(os.Getenv("ZOHO_AUTH_ENABLED")); err != nil {
 		return s, err
 	}
@@ -317,6 +322,14 @@ func parseSwaggerEnabled(raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("SWAGGER_ENABLED 必須是 true|false（目前 %q）", raw)
 	}
+}
+
+// parseWebDir 解析 WEB_DIR；未設定時預設為 "web"。
+func parseWebDir(raw string) string {
+	if raw == "" {
+		return "web"
+	}
+	return raw
 }
 
 // parseZohoAuthEnabled 解析 ZOHO_AUTH_ENABLED（大小寫不敏感）；未設定時預設關閉。

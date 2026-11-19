@@ -341,7 +341,7 @@ type SyncJobQueue struct {
 - 此限制只針對本服務提供的端點；呼叫 Xero API 照 Xero 要求（例如註冊 webhook 是 `PUT /webhooks`）。
 - 頁面路由（`/`、`/setup`、`/swagger`、`/openapi.json`）一律只允許 `GET`，其他方法回 `405 Method Not Allowed` 並帶 `Allow: GET`。
 - `GET /` 是 `ServeMux` 的 catch-all，handler 必須以 `r.URL.Path == "/"` 精確判斷；其餘未知路徑回 `404`，不得回介紹頁。
-- 頁面路由由 `pkg/handler/static.go` 的 `StaticHandler` 提供，資產以 `os.DirFS("web")` 或 `embed.FS` 打包進 binary，**不新增 Go 依賴**。
+- 頁面路由由 `pkg/handler/static.go` 的 `StaticHandler` 提供，資產以 `os.DirFS(cfg.WebDir)` 讀取（`WEB_DIR` 環境變數，預設 `web`），或用 `embed.FS` 打包進 binary，**不新增 Go 依賴**。
 - `StaticHandler` 先判斷方法再判斷路徑，故未註冊路徑的非 `GET` 請求回 `405`，`GET` 未註冊路徑回 `404`。
 - Swagger UI（`swagger-ui-dist@5`）以 jsDelivr CDN 載入：內網無外網時頁面只缺工具，`/openapi.json` 與既有 API 端點不受影響；頁面本身不含認證。
 - `/setup` 頁面使用 petite-vue（~6KB CDN），動態載入 `/api/setup/config` 與 `/api/setup/status`，顯示 Xero App 配置資訊與授權狀態。
@@ -366,6 +366,7 @@ type SyncJobQueue struct {
 | `SYNC_JOB_POLL_INTERVAL` | 選用；sync job queue 佇列為空時的等待間隔（毫秒），未設定時預設 5000 |
 | `LOG_LEVEL` | 選用；日誌等級 `debug`／`info`／`warn`／`error`（大小寫不敏感），未設定時預設 `info`；非法值啟動即報錯 |
 | `SWAGGER_ENABLED` | 選用；是否開放 `/swagger` 與 `/openapi.json`（`"true"` / `"false"`，大小寫不敏感），未設定時預設 `false`；關閉時兩路由回 `404` |
+| `WEB_DIR` | 選用；靜態檔案目錄路徑，未設定時預設 `web`；部署時可指定絕對路徑或相對路徑 |
 | `ZOHO_AUTH_ENABLED` | 選用；是否啟用 Zoho Auth Gate 保護敏感路由（`"true"` / `"false"`，大小寫不敏感），未設定時預設 `false`；啟用時需同時設定 `ZOHO_CLIENT_ID`、`ZOHO_CLIENT_SECRET`、`ZOHO_SESSION_SECRET` |
 | `ZOHO_CLIENT_ID` | `ZOHO_AUTH_ENABLED=true` 時必填；Zoho OAuth Client ID |
 | `ZOHO_CLIENT_SECRET` | `ZOHO_AUTH_ENABLED=true` 時必填；Zoho OAuth Client Secret |
