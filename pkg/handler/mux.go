@@ -28,9 +28,18 @@ func NewMux(
 
 	// 靜態檔案（公開）
 	mux.HandleFunc("/", static.Handle)
-	mux.HandleFunc("/setup", static.Handle)
 	mux.HandleFunc("/swagger", static.Handle)
 	mux.HandleFunc("/openapi.json", static.Handle)
+
+	// /setup 頁面：啟用 Zoho Auth 時需登入才能存取
+	if zohoAuth != nil {
+		mux.Handle("/setup", zohoAuth.RequireAuthRedirect(http.HandlerFunc(static.Handle)))
+	} else {
+		mux.HandleFunc("/setup", static.Handle)
+	}
+
+	// Setup 配置 API（公開）：只回傳 webhook URL／redirect URI／client ID 等非敏感配置，不需要登入
+	mux.HandleFunc("/api/setup/config", setupAPI.HandleConfig)
 
 	// Xero OAuth routes（不受 Zoho Auth 保護，因為是 Xero 回調）
 	mux.HandleFunc("/callback", xeroAuth.HandleCallback)
@@ -50,8 +59,7 @@ func NewMux(
 		mux.Handle("/api/status/tenants", zohoAuth.RequireAuth(http.HandlerFunc(status.HandleTenants)))
 		mux.Handle("/api/status/webhooks", zohoAuth.RequireAuth(http.HandlerFunc(status.HandleWebhooks)))
 
-		// Setup API
-		mux.Handle("/api/setup/config", zohoAuth.RequireAuth(http.HandlerFunc(setupAPI.HandleConfig)))
+		// Setup API（授權狀態與觸發授權流程）
 		mux.Handle("/api/setup/status", zohoAuth.RequireAuth(http.HandlerFunc(setupAPI.HandleStatus)))
 		mux.Handle("/api/auth/xero/start", zohoAuth.RequireAuth(http.HandlerFunc(xeroAuth.HandleStart)))
 	} else {
@@ -60,7 +68,6 @@ func NewMux(
 		mux.HandleFunc("/api/status/jobs", status.HandleJobs)
 		mux.HandleFunc("/api/status/tenants", status.HandleTenants)
 		mux.HandleFunc("/api/status/webhooks", status.HandleWebhooks)
-		mux.HandleFunc("/api/setup/config", setupAPI.HandleConfig)
 		mux.HandleFunc("/api/setup/status", setupAPI.HandleStatus)
 		mux.HandleFunc("/api/auth/xero/start", xeroAuth.HandleStart)
 	}

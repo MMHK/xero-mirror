@@ -52,11 +52,11 @@ web/
 
 | Method | Path | 用途 | 受保護 |
 |--------|------|------|--------|
-| GET | `/api/setup/config` | webhook URL、redirect URI、client ID | ✅ |
+| GET | `/api/setup/config` | webhook URL、redirect URI、client ID、Zoho redirect URI | ❌（公開非敏感配置） |
 | GET | `/api/setup/status` | 授權狀態（tenants 清單） | ✅ |
 | POST | `/api/auth/xero/start` | 啟動 Xero OAuth，返回 authorize URL | ✅ |
 | GET | `/callback` | Xero OAuth 回調（Xero 回調，不能是 API） | ❌ |
-| POST | `/api/auth/zoho/start` | 啟動 Zoho OAuth，返回 authorize URL | ❌（登入入口） |
+| GET | `/login` | 啟動 Zoho OAuth（登入入口） | ❌（登入入口） |
 | GET | `/oauth/zoho/callback` | Zoho OAuth 回調 | ❌ |
 | GET | `/logout` | 清除 session | ❌ |
 
@@ -66,7 +66,8 @@ web/
 {
   "webhook_url": "https://example.com/webhook",
   "redirect_uri": "https://example.com/callback",
-  "client_id": "xxxxx"
+  "client_id": "xxxxx",
+  "zoho_redirect_uri": "https://example.com/oauth/zoho/callback"  // 僅 ZOHO_AUTH_ENABLED=true 時出現
 }
 
 // GET /api/setup/status
@@ -160,8 +161,9 @@ web/
 
 </main>
 
-<script src="https://unpkg.com/petite-vue"></script>
-<script>
+<script type="module">
+import { createApp } from 'https://unpkg.com/petite-vue?module'
+
 function SetupApp() {
   return {
     loading: true,
@@ -178,6 +180,13 @@ function SetupApp() {
         fetch('/api/setup/status'),
       ])
       this.config = await cfgRes.json()
+      if (this.config.zoho_redirect_uri) {
+        this.fields.push({
+          key: 'zoho_redirect_uri',
+          label: 'Zoho Redirect URI',
+          desc: 'Zoho OAuth 授權完成後回調到此 URL（需設定到 Zoho App 的 Authorized Redirect URIs）',
+        })
+      }
       const status = await statusRes.json()
       this.tenants = status.tenants || []
       this.loading = false
@@ -197,6 +206,8 @@ function SetupApp() {
     },
   }
 }
+
+createApp({ SetupApp }).mount()
 </script>
 </body>
 </html>
@@ -210,11 +221,11 @@ function SetupApp() {
 
 | Route | Method | 用途 | Zoho 保護 |
 |-------|--------|------|-----------|
-| `/api/setup/config` | GET | 回傳 webhook URL、redirect URI、client ID | ✅ |
+| `/api/setup/config` | GET | 回傳 webhook URL、redirect URI、client ID、Zoho redirect URI | ❌（公開非敏感配置） |
 | `/api/setup/status` | GET | 回傳 tenant 授權狀態 | ✅ |
 | `/api/auth/xero/start` | POST | 產生 state、回傳 authorize URL（動態 redirect URI） | ✅ |
 | `/callback` | GET | 接收 Xero 授權回調、驗證 state、exchange code、storeAuthTenants → 302 到 `/setup` | ❌（Xero 回調） |
-| `/api/auth/zoho/start` | POST | 產生 state、回傳 Zoho authorize URL | ❌（登入入口） |
+| `/login` | GET | 產生 state、302 重導到 Zoho authorize URL | ❌（登入入口） |
 | `/oauth/zoho/callback` | GET | Zoho 授權回調，驗證身份、設 session cookie、302 到 `/setup` | ❌（Zoho 回調） |
 | `/logout` | GET | 清除 session cookie，302 到 `/` | ❌ |
 
@@ -246,7 +257,7 @@ function SetupApp() {
 | `pkg/handler/static.go` | 靜態檔案服務（`//go:embed web/*` + `http.FileServer`） |
 | `pkg/handler/setup_api.go` | `SetupAPIHandler` — `/api/setup/config` + `/api/setup/status` |
 | `pkg/handler/auth.go` | `XeroAuthHandler` — `/api/auth/xero/start` + `/callback` |
-| `pkg/handler/zoho.go` | `ZohoAuthHandler` — `/api/auth/zoho/start` + `/oauth/zoho/callback` + `/logout` + middleware |
+| `pkg/handler/zoho.go` | `ZohoAuthHandler` — `/login` + `/oauth/zoho/callback` + `/logout` + middleware |
 | `pkg/handler/host.go` | `ResolveBaseURL(r *http.Request) string` — host 推演共用函數 |
 | `pkg/handler/static_test.go` | 測試靜態檔案 serve |
 | `pkg/handler/setup_api_test.go` | 測試 API response |
@@ -307,12 +318,12 @@ func StoreAuthTenants(ctx context.Context, st *store.Store, cipher *Cipher,
 用 Zoho OAuth 做身份驗證（不存取 Zoho 資料），保護敏感路由。
 
 **流程**：
-1. 使用者存取受保護 API → middleware 檢查 session cookie → 無 cookie → 回 401
-2. 前端收到 401 → `window.location.href = '/login'`（或 `/api/auth/zoho/start` 回傳 authorize URL）
-3. `/api/auth/zoho/start` → 產生 state → 回傳 Zoho authorize URL
-4. 前端 `window.location.href = authorize_url` → Zoho 登入頁
+1. 使用者存取受保護頁面 `/setup` → `RequireAuthRedirect` 檢查 session cookie → 無 cookie → 302 到 `/login`；存取受保護 API → `RequireAuth` → 無 cookie → 回 401
+2. 瀏覽器被 302 帶到 `/login`
+3. `/login` → 產生 state → 302 重導到 Zoho authorize URL
+4. 瀏覽器自動前往 Zoho 登入頁
 5. 使用者在 Zoho 登入 → Zoho 回調到 `/oauth/zoho/callback`
-6. `/oauth/zoho/callback` → exchange code → 取得 access token → 呼叫 userinfo → 驗證 email → 設 signed cookie → 302 到 `/setup`
+6. `/oauth/zoho/callback` → exchange code → 取得 access token → 呼叫 userinfo → 驗證 email domain → 設 signed cookie → 302 到 `/setup`
 7. 後續請求帶有效 cookie → middleware 放行
 
 **Session 管理**：
@@ -350,17 +361,19 @@ type ZohoAuthHandler struct {
 **Middleware**：
 ```go
 func (h *ZohoAuthHandler) RequireAuth(next http.Handler) http.Handler
+func (h *ZohoAuthHandler) RequireAuthRedirect(next http.Handler) http.Handler
 ```
 - 檢查 `xm_session` cookie
 - 驗證 HMAC 簽名 + 未過期
-- 驗證 email 在 allowlist（若設定）
-- 驗證失敗 → 回 401 JSON（前端處理跳轉）
+- 驗證 email domain 在 allowlist（若設定）
+- `RequireAuth`（API）：驗證失敗 → 回 401 JSON（前端處理跳轉）
+- `RequireAuthRedirect`（頁面）：驗證失敗 → 302 重導到 `/login`
 
 **Session Cookie 格式**：
 ```
-xm_session = base64(email) + "." + expiry_unix + "." + hmac_signature
+xm_session = base64( email + "|" + expiry_unix + "|" + hmac_signature )
 ```
-- Signature = HMAC-SHA256(email + "." + expiry, sessionSecret)
+- Signature = hex(HMAC-SHA256(email + "|" + expiry_unix, sessionSecret))
 - 驗證時重新計算 HMAC 比對
 
 ### `/callback` 行為（Xero OAuth 回調）
@@ -376,12 +389,13 @@ xm_session = base64(email) + "." + expiry_unix + "." + hmac_signature
 
 ### 安全考量
 
-- `/api/setup/*`：不洩漏 `ClientSecret`、`WebhookKey`、`TokenEncKey`；受 Zoho Auth 保護
+- `/api/setup/config`：僅回傳非敏感配置（webhook URL／redirect URI／client ID／Zoho redirect URI），公開不需登入；不洩漏 `ClientSecret`、`WebhookKey`、`TokenEncKey`
+- `/api/setup/status` 與 `/api/auth/xero/start`：受 Zoho Auth 保護
 - `/api/auth/xero/start`：state 用 `crypto/rand` 產生，不可預測；受 Zoho Auth 保護
 - `/callback`：驗證 state 存在且未過期；不洩漏 token 細節
-- `/api/auth/zoho/start`、`/oauth/zoho/callback`：Zoho OAuth 標準流程，驗證 state 防止 CSRF
+- `/login`、`/oauth/zoho/callback`：Zoho OAuth 標準流程，驗證 state 防止 CSRF
 - Session cookie：HMAC-SHA256 簽名，防篡改；24 小時過期
-- Email allowlist：可限制只有特定 Zoho 帳號能登入
+- Email allowlist → 改為 email domain allowlist：可限制只有特定網域的 Zoho 帳號能登入
 
 ### Zoho 環境變數
 

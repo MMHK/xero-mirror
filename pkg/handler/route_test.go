@@ -19,7 +19,7 @@ func TestMuxRoutesWebhook(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, true),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -42,7 +42,7 @@ func TestMuxRoutesHealth(t *testing.T) {
 			NewHealthHandler(s),
 			NewStatusHandler(nil),
 			NewStaticHandler(testFS, false),
-			NewSetupAPIHandler(nil, "test-client-id"),
+			NewSetupAPIHandler(nil, "test-client-id", false),
 			NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 			nil, // zohoAuth
 		)
@@ -58,7 +58,7 @@ func TestMuxRoutesHealth(t *testing.T) {
 			NewHealthHandler(nil),
 			NewStatusHandler(nil),
 			NewStaticHandler(testFS, false),
-			NewSetupAPIHandler(nil, "test-client-id"),
+			NewSetupAPIHandler(nil, "test-client-id", false),
 			NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 			nil, // zohoAuth
 		)
@@ -80,7 +80,7 @@ func TestPageHome(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, false),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -102,7 +102,7 @@ func TestPageSwaggerEnabled(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, true),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -125,7 +125,7 @@ func TestPageSwaggerDisabled(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, false),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -146,7 +146,7 @@ func TestPageOpenAPISpec(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, true),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -181,7 +181,7 @@ func TestPageMethodsNotAllowed(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, true),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -201,7 +201,7 @@ func TestPageUnknownPath(t *testing.T) {
 		NewHealthHandler(nil),
 		NewStatusHandler(nil),
 		NewStaticHandler(testFS, false),
-		NewSetupAPIHandler(nil, "test-client-id"),
+		NewSetupAPIHandler(nil, "test-client-id", false),
 		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
 		nil, // zohoAuth
 	)
@@ -211,4 +211,43 @@ func TestPageUnknownPath(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.NotContains(t, rec.Body.String(), "<html")
 	require.NotContains(t, rec.Body.String(), "xero-mirror")
+}
+
+// 案例：啟用 Zoho Auth 時，/api/setup/config 公開、/api/setup/status 需登入、/setup 頁面 302 到 /login。
+func TestMuxRoutesZohoAuthProtection(t *testing.T) {
+	testFS := fstest.MapFS{}
+	zoho := NewZohoAuthHandler(ZohoAuthConfig{
+		ClientID:       "test-client-id",
+		ClientSecret:   "test-client-secret",
+		AccountsDomain: "accounts.zoho.com",
+		SessionSecret:  make([]byte, 32),
+	})
+	mux := NewMux(
+		NewWebhookHandler(nil, []byte(testWebhookKey)),
+		NewHealthHandler(nil),
+		NewStatusHandler(nil),
+		NewStaticHandler(testFS, false),
+		NewSetupAPIHandler(nil, "test-client-id", true),
+		NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret"),
+		zoho,
+	)
+
+	t.Run("config 公開", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/setup/config", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("status 需登入", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/setup/status", nil))
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("setup 頁面重導到 login", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/setup", nil))
+		require.Equal(t, http.StatusFound, rec.Code)
+		require.Equal(t, "/login", rec.Header().Get("Location"))
+	})
 }

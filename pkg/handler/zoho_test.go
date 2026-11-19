@@ -222,3 +222,23 @@ func TestZohoAuthHandler_StateValidation(t *testing.T) {
 	// 再次驗證應該失敗（用完即刪）
 	require.False(t, h.validateState(state))
 }
+
+func TestZohoAuthHandler_RequireAuthRedirect_NoCookie(t *testing.T) {
+	h := NewZohoAuthHandler(ZohoAuthConfig{
+		ClientID:       "test-client-id",
+		ClientSecret:   "test-client-secret",
+		AccountsDomain: "accounts.zoho.com",
+		SessionSecret:  make([]byte, 32),
+	})
+
+	handler := h.RequireAuthRedirect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/setup", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "/login", rec.Header().Get("Location"))
+}

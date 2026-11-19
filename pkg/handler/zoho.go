@@ -213,13 +213,27 @@ func (h *ZohoAuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// RequireAuth 是 middleware，檢查 session cookie 是否有效。
+// RequireAuth 是 middleware，檢查 session cookie 是否有效；未授權時回 401 JSON（適用於 API）。
 func (h *ZohoAuthHandler) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		email, err := h.validateSessionCookie(r)
 		if err != nil {
 			slog.Debug("require auth failed", "err", err)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未授權"})
+			return
+		}
+		slog.Debug("auth required passed", "email", email)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireAuthRedirect 是 middleware，檢查 session cookie 是否有效；未授權時 302 重導到 /login（適用於頁面）。
+func (h *ZohoAuthHandler) RequireAuthRedirect(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, err := h.validateSessionCookie(r)
+		if err != nil {
+			slog.Debug("require auth redirect failed", "err", err)
+			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
 		slog.Debug("auth required passed", "email", email)
@@ -388,7 +402,7 @@ func (h *ZohoAuthHandler) signSession(email string, expiry time.Time) string {
 	mac := hmac.New(sha256.New, h.sessionSecret)
 	mac.Write([]byte(payload))
 	signature := hex.EncodeToString(mac.Sum(nil))
-	return base64.StdEncoding.EncodeToString([]byte(payload+"|"+signature))
+	return base64.StdEncoding.EncodeToString([]byte(payload + "|" + signature))
 }
 
 // parseSession 解析 session。

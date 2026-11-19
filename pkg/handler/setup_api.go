@@ -9,20 +9,22 @@ import (
 
 // SetupAPIHandler 提供 Xero App Setup 頁面的 API endpoints。
 type SetupAPIHandler struct {
-	store    *store.Store
-	clientID string
+	store           *store.Store
+	clientID        string
+	zohoAuthEnabled bool
 }
 
 // NewSetupAPIHandler 建立 SetupAPIHandler。
-func NewSetupAPIHandler(st *store.Store, clientID string) *SetupAPIHandler {
-	return &SetupAPIHandler{store: st, clientID: clientID}
+func NewSetupAPIHandler(st *store.Store, clientID string, zohoAuthEnabled bool) *SetupAPIHandler {
+	return &SetupAPIHandler{store: st, clientID: clientID, zohoAuthEnabled: zohoAuthEnabled}
 }
 
 // SetupConfigResponse 是 /api/setup/config 的回應格式。
 type SetupConfigResponse struct {
-	WebhookURL  string `json:"webhook_url"`
-	RedirectURI string `json:"redirect_uri"`
-	ClientID    string `json:"client_id"`
+	WebhookURL      string `json:"webhook_url"`
+	RedirectURI     string `json:"redirect_uri"`
+	ClientID        string `json:"client_id"`
+	ZohoRedirectURI string `json:"zoho_redirect_uri,omitempty"`
 }
 
 // HandleConfig 處理 GET /api/setup/config，回傳 Xero App 配置資訊。
@@ -38,6 +40,10 @@ func (h *SetupAPIHandler) HandleConfig(w http.ResponseWriter, r *http.Request) {
 		WebhookURL:  baseURL + "/webhook",
 		RedirectURI: baseURL + "/callback",
 		ClientID:    h.clientID,
+	}
+
+	if h.zohoAuthEnabled {
+		resp.ZohoRedirectURI = baseURL + "/oauth/zoho/callback"
 	}
 
 	writeJSON(w, http.StatusOK, resp)

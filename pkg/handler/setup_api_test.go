@@ -10,7 +10,7 @@ import (
 )
 
 func TestSetupAPIHandler_HandleConfig(t *testing.T) {
-	h := NewSetupAPIHandler(nil, "test-client-id")
+	h := NewSetupAPIHandler(nil, "test-client-id", false)
 	req := httptest.NewRequest(http.MethodGet, "/api/setup/config", nil)
 	req.Host = "example.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -26,10 +26,11 @@ func TestSetupAPIHandler_HandleConfig(t *testing.T) {
 	require.Equal(t, "https://example.com/webhook", resp.WebhookURL)
 	require.Equal(t, "https://example.com/callback", resp.RedirectURI)
 	require.Equal(t, "test-client-id", resp.ClientID)
+	require.Empty(t, resp.ZohoRedirectURI)
 }
 
 func TestSetupAPIHandler_HandleConfig_MethodNotAllowed(t *testing.T) {
-	h := NewSetupAPIHandler(nil, "test-client-id")
+	h := NewSetupAPIHandler(nil, "test-client-id", false)
 	req := httptest.NewRequest(http.MethodPost, "/api/setup/config", nil)
 
 	rec := httptest.NewRecorder()
@@ -40,7 +41,7 @@ func TestSetupAPIHandler_HandleConfig_MethodNotAllowed(t *testing.T) {
 }
 
 func TestSetupAPIHandler_HandleConfig_ForwardedHost(t *testing.T) {
-	h := NewSetupAPIHandler(nil, "test-client-id")
+	h := NewSetupAPIHandler(nil, "test-client-id", false)
 	req := httptest.NewRequest(http.MethodGet, "/api/setup/config", nil)
 	req.Host = "internal.example.com"
 	req.Header.Set("X-Forwarded-Host", "public.example.com")
@@ -55,4 +56,20 @@ func TestSetupAPIHandler_HandleConfig_ForwardedHost(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, "https://public.example.com/webhook", resp.WebhookURL)
 	require.Equal(t, "https://public.example.com/callback", resp.RedirectURI)
+}
+
+func TestSetupAPIHandler_HandleConfig_ZohoAuthEnabled(t *testing.T) {
+	h := NewSetupAPIHandler(nil, "test-client-id", true)
+	req := httptest.NewRequest(http.MethodGet, "/api/setup/config", nil)
+	req.Host = "example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	rec := httptest.NewRecorder()
+	h.HandleConfig(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp SetupConfigResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "https://example.com/oauth/zoho/callback", resp.ZohoRedirectURI)
 }

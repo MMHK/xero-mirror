@@ -42,16 +42,16 @@ func TestXeroAuthHandler_HandleStart_MethodNotAllowed(t *testing.T) {
 
 func TestXeroAuthHandler_HandleCallback_MissingCode(t *testing.T) {
 	h := NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret")
-	
+
 	// 先產生一個有效的 state
 	stateReq := httptest.NewRequest(http.MethodPost, "/api/auth/xero/start", nil)
 	stateReq.Host = "example.com"
 	stateRec := httptest.NewRecorder()
 	h.HandleStart(stateRec, stateReq)
-	
+
 	var stateResp XeroAuthStartResponse
 	require.NoError(t, json.Unmarshal(stateRec.Body.Bytes(), &stateResp))
-	
+
 	// 從 authorize URL 中提取 state
 	// 簡單起見，我們直接測試缺少 code 的情況
 	req := httptest.NewRequest(http.MethodGet, "/callback?state=invalid-state", nil)
@@ -75,30 +75,30 @@ func TestXeroAuthHandler_HandleCallback_MethodNotAllowed(t *testing.T) {
 
 func TestXeroAuthHandler_StateValidation(t *testing.T) {
 	h := NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret")
-	
+
 	// 產生 state
 	state, err := h.generateState()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
-	
+
 	// 驗證 state 有效
 	require.True(t, h.validateState(state))
-	
+
 	// 再次驗證應該失敗（用完即刪）
 	require.False(t, h.validateState(state))
 }
 
 func TestXeroAuthHandler_StateExpiration(t *testing.T) {
 	h := NewXeroAuthHandler(nil, nil, "test-client-id", "test-client-secret")
-	
+
 	// 產生 state
 	state, err := h.generateState()
 	require.NoError(t, err)
-	
+
 	// 等待超過過期時間（這個測試會很慢，所以我們用另一個方法）
 	// 直接測試 cleanupExpiredStates 方法
 	h.cleanupExpiredStates()
-	
+
 	// state 應該還有效（因為還沒過期）
 	require.True(t, h.validateState(state))
 }

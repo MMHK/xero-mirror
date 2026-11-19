@@ -204,23 +204,23 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 	}
 
 	queue := handler.NewSyncJobQueue(queueCtx, runner, st, cfg.SyncJobBatchSize, cfg.SyncJobPollInterval)
-	
+
 	// 建立 cipher（用於 Xero Auth handler）
 	cipher, err := xero.NewCipher(cfg.TokenEncKey)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("建立 token 加密器失敗: %w", err)
 	}
-	
+
 	// 建立靜態檔案 handler
 	staticHandler := handler.NewStaticHandler(os.DirFS(cfg.WebDir), cfg.SwaggerEnabled)
-	
+
 	// 建立 Setup API handler
-	setupAPIHandler := handler.NewSetupAPIHandler(st, cfg.ClientID)
-	
+	setupAPIHandler := handler.NewSetupAPIHandler(st, cfg.ClientID, cfg.ZohoAuthEnabled)
+
 	// 建立 Xero Auth handler
 	xeroAuthHandler := handler.NewXeroAuthHandler(st, cipher, cfg.ClientID, cfg.ClientSecret)
-	
+
 	// 建立 Zoho Auth handler（可為 nil）
 	var zohoAuthHandler *handler.ZohoAuthHandler
 	if cfg.ZohoAuthEnabled {
@@ -232,7 +232,7 @@ func buildServeDeps(ctx context.Context, cfg *config.Config, cronCtx, queueCtx c
 			SessionSecret:  cfg.ZohoSessionSecret,
 		})
 	}
-	
+
 	mux := handler.NewMux(
 		handler.NewWebhookHandler(st, []byte(cfg.WebhookKey)),
 		handler.NewHealthHandler(st),

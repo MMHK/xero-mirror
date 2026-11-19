@@ -103,6 +103,14 @@ function SetupApp() {
         ])
         if (cfgRes.ok) {
           this.config = await cfgRes.json()
+          // 如果啟用 Zoho Auth，動態加入 Zoho Redirect URI
+          if (this.config.zoho_redirect_uri) {
+            this.fields.push({
+              key: 'zoho_redirect_uri',
+              label: 'Zoho Redirect URI',
+              desc: 'Zoho OAuth 授權完成後回調到此 URL（需設定到 Zoho App 的 Authorized Redirect URIs）',
+            })
+          }
         }
         if (statusRes.ok) {
           const status = await statusRes.json()
